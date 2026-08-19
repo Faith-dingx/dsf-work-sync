@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# 门禁：提交前强制 格式+lint 检查，不过不能提交
+npx lint-staged

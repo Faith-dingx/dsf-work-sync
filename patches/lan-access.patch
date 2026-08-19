@@ -1,0 +1,167 @@
+commit e03033c0ba5b44db223950c9adf57b7afa3489a9
+Author: dingx <dingx@dingx-ubuntu.tail77cc7a.ts.net>
+Date:   Tue Aug 18 14:17:26 2026 +0800
+
+    feat(web): support serving the Web UI over LAN/remote reach
+    
+    Allow dsh web to bind 0.0.0.0 (or any address) and serve remote clients by
+    opening the privileged API plane to explicitly trusted non-loopback hosts.
+    
+    - startup: drop the hard block on --host 0.0.0.0; any bind address is now
+      accepted at the caller's discretion.
+    - host-webserver: widen the listen host config from the two loopback constants
+      to any string bind address.
+    - client-connection: the privileged-method fence now accepts the deployment's
+      trustedHosts instead of an empty list, so a LAN/remote deployment that
+      declares --trusted-host authorities can drive settings, credentials, and
+      other privileged methods from those hosts; default (no trusted hosts)
+      behaviour stays loopback-same-origin.
+    - web main: polyfill crypto.randomUUID for insecure (non-HTTPS) origins so the
+      workspace/settings UI works when reached over http://<LAN-IP>:3080.
+    
+    Verified with build:lib:host and typecheck:contracts-ready (both clean).
+
+diff --git a/apps/web/src/main.ts b/apps/web/src/main.ts
+index feb85db15a..c2b98aa39d 100644
+--- a/apps/web/src/main.ts
++++ b/apps/web/src/main.ts
+@@ -3,6 +3,38 @@
+  * loader holding, module-table seeding, AppRoot gate, plugin assembly — lives
+  * in @deepseek-ai/dsh-client-web; this file only finds the mount point.
+  */
++
++// Polyfill crypto.randomUUID for insecure origins (non-HTTPS / non-localhost
++// access, e.g. http://<LAN-IP>:3080). In insecure contexts the Web Crypto
++// `randomUUID` is unavailable, which broke workspace/settings UI. Backfill it
++// with a RFC 4122 v4 UUID built from crypto.getRandomValues, which browsers
++// do expose on insecure origins.
++if (typeof globalThis.crypto?.randomUUID !== 'function') {
++  const cryptoObj: Crypto | undefined = globalThis.crypto
++  const uuid = (): `${string}-${string}-${string}-${string}-${string}` => {
++    const raw = new Uint8Array(16)
++    // crypto.getRandomValues is available on insecure origins; fall back to
++    // Math.random-derived filler only if even that is absent.
++    const grv = globalThis.crypto?.getRandomValues
++    if (grv) {
++      grv.call(globalThis.crypto, raw)
++    } else {
++      for (let i = 0; i < 16; i++) raw[i] = Math.floor(Math.random() * 256)
++    }
++    const b6 = raw[6] ?? 0
++    const b8 = raw[8] ?? 0
++    raw[6] = (b6 & 0x0f) | 0x40
++    raw[8] = (b8 & 0x3f) | 0x80
++    const hex = Array.from(raw, b => b.toString(16).padStart(2, '0'))
++    return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`
++  }
++  if (cryptoObj) {
++    cryptoObj.randomUUID = uuid
++  } else {
++    ;(globalThis as Record<string, unknown>).crypto = { randomUUID: uuid }
++  }
++}
++
+ import { AppWebEntry } from '@deepseek-ai/dsh-client-web'
+ 
+ const el = document.getElementById('root')
+diff --git a/packages/bundle/web-app/src/startup.ts b/packages/bundle/web-app/src/startup.ts
+index af6997cff7..d3a2c6d9dd 100644
+--- a/packages/bundle/web-app/src/startup.ts
++++ b/packages/bundle/web-app/src/startup.ts
+@@ -57,18 +57,18 @@ Examples:
+ 
+ /**
+  * Parse and provide the Web invocation as an ordinary Cordis service. The
+- * command's action publishes the flags this invocation named; `--host 0.0.0.0`
+- * or a non-numeric `--port` is a usage error, so on rejection (and on `--help`)
+- * nothing is provided.
++ * command's action publishes the flags this invocation named; only a
++ * non-numeric `--port` is a usage error, so on rejection (and on `--help`)
++ * nothing is provided. `--host 0.0.0.0` (or any bind address) is allowed so a
++ * deployment can serve a LAN or remote reach at the caller's discretion; the
++ * `/api` browser-trust fence still gates non-loopback clients through
++ * `--trusted-host` authorities.
+  * @param ctx - plugin context carrying the command line.
+  */
+ export function apply(ctx: Context): void {
+   const program = webCommand()
+   program.action(() => {
+     const options = program.opts<WebOptions>()
+-    if (options.host === '0.0.0.0') {
+-      program.error('error: --host 0.0.0.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127.0.0.1 instead')
+-    }
+     if (options.port !== undefined && !/^\d+$/.test(options.port)) {
+       program.error(`error: --port must be a number, got ${JSON.stringify(options.port)}`)
+     }
+diff --git a/packages/client/connection/src/index.ts b/packages/client/connection/src/index.ts
+index 35084918e8..dfff5fd85f 100644
+--- a/packages/client/connection/src/index.ts
++++ b/packages/client/connection/src/index.ts
+@@ -67,16 +67,17 @@ export const Config: z<ConnectionConfig> = z.object({
+ })
+ 
+ /**
+- * Methods gated to loopback even on a trusted-host deployment. Native dialogs
+- * act on the host machine; the settings and credential domains mutate the
+- * user's configuration and secret store, and READING them is equally
++ * Methods gated to loopback by default; a deployment that expressly lists
++ * non-loopback authorities in `trustedHosts` opens them to those clients.
++ * Native dialogs act on the host machine; the settings and credential domains
++ * mutate the user's configuration and secret store, and READING them is equally
+  * privileged — `settings.describe` returns every exposed namespace's
+  * configuration and `credentials.describe` reports whether an arbitrary
+  * environment-variable name is configured and where from, which is
+  * reconnaissance no anonymous caller should have. `trustedHosts` is a
+  * DNS-rebinding fence, explicitly not authentication, so the whole
+- * configuration plane stays loopback-same-origin until a real authentication
+- * layer exists. `llm.discoverModels` belongs to that plane on both counts: it
++ * configuration plane stays loopback-same-origin by default until a real
++ * authentication layer exists. `llm.discoverModels` belongs to that plane on both counts: it
+  * carries a draft credential, and it makes the HOST issue a GET to a URL the
+  * caller chose and reports back the status or the parsed body — an anonymous
+  * LAN caller would have a probe for whatever the host can reach and the
+@@ -122,8 +123,9 @@ const PRIVILEGED_METHODS = new Set([
+  * Mounts the API gateway under the browser transport prefix. Every request on
+  * the prefix passes the browser-trust fence first (DNS-rebinding and
+  * cross-site defense — [api-request-trust](./api-request-trust.ts));
+- * privileged methods additionally pass it with an empty trust list, which
+- * pins them to loopback.
++ * privileged methods additionally pass that same fence with the deployment's
++ * `trustedHosts`, so they stay loopback-same-origin by default and open to
++ * explicitly trusted non-loopback authorities on a LAN deployment.
+  * @param ctx - Host plugin context.
+  * @param config - resolved plugin config (schema defaults applied).
+  */
+@@ -144,7 +146,7 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
+         : undefined
+       if (method !== undefined
+         && PRIVILEGED_METHODS.has(method)
+-        && !isTrustedApiRequest(request, [])) {
++        && !isTrustedApiRequest(request, trustedHosts)) {
+         return new Response('forbidden', { status: 403 })
+       }
+       if (request.method === 'GET' && (pathname === MUX_EVENTS_PATH || pathname === HOST_EVENTS_PATH)) {
+diff --git a/packages/host/webserver/src/index.ts b/packages/host/webserver/src/index.ts
+index a6c335b8d5..61ab824bce 100644
+--- a/packages/host/webserver/src/index.ts
++++ b/packages/host/webserver/src/index.ts
+@@ -43,8 +43,8 @@ export interface WebUpgradeRoute {
+ 
+ /** Gateway config: the listen address. */
+ export interface Config {
+-  /** Listen host; the two supported values are loopback and all-interfaces. */
+-  host: '127.0.0.1' | '0.0.0.0'
++  /** Listen host; any bind address (loopback, all-interfaces, or a specific interface IP). */
++  host: string
+   /** Listen port; zero requests an OS-assigned port. */
+   port: number
+ }
+@@ -58,7 +58,7 @@ export interface Config {
+  */
+ export class WebServer extends Service {
+   static Config: z<Config> = z.object({
+-    host: z.union([z.const('127.0.0.1'), z.const('0.0.0.0')]).required(),
++    host: z.string().required(),
+     port: z.natural().max(65535).required(),
+   })
+ 

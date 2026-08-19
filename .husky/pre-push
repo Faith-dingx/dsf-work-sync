@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# 门禁：推送前强制测试通过，不过不能推送
+npm test
