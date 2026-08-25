@@ -10,6 +10,18 @@
 | 模型路由地址 | `http://10.10.10.2:9888/...`（guard L271/278、skill-router L263、compaction L146） | **刻意保留 IP 不归一 localhost**：软路由是局域网 AI 网关固定服务端，任何设备 clone 配置即用。dsh 迁入后自身即 10.10.10.2，局域网 IP 访问自身可达。 |
 | 网关其他端口 | :7000 面板 / :8081 监控 / :9119 Hermes / :80 LuCI / :7681 ttyd / :5244 AList       | 软路由资产，随盘走                                                                                                                                 |
 
+## 一之补、磁盘落点（2026-08-25 定案：/mnt/hermes/dsh/ + 4 重隔离）
+
+- **落点**：`/mnt/hermes/dsh/`（app/node/home 全部在该子目录；hermes 分区可用 13.3G，dsh 全套 <2G，余量充足，且与 Hermes/9888 同属 AI 服务区、随盘走）
+- **不用系统盘 overlay（小、影响路由器稳定）、不用 /mnt/data（混媒体盘）**
+- **4 重隔离（必须全部落地，否则互扰）**：
+  - [ ] ① 目录隔离：`/mnt/hermes/dsh/{app,node,home}` 独立子目录，不散落 hermes 根
+  - [ ] ② **Git 隔离**：Hermes 根 `.gitignore` 追加 `/dsh/`（否则 hermes 项目 `git add -A` 会把 dsh 数据误纳入，几 GB 污染+泄密）
+  - [ ] ③ 服务隔离：独立 procd `/etc/init.d/dsh`(S95) + 独立日志 /var/log/dsh.log；不碰 hermes-serve(9119)/model-router(9888) 启动脚本
+  - [ ] ④ 数据隔离：dsh home/settings.yaml 600、独立会话/记忆；不回写 `.hermes/`、venv、work
+- **安装适配**：install.sh 硬编码 `/srv/dsh`——二选一：`ln -s /mnt/hermes/dsh /srv/dsh` 后正常装；或改 install.sh 的 APP_DIR/NODE_DIR/DSH_HOME 指向 /mnt/hermes/dsh/（用 scripts/adapt-machine-paths.sh 思路）
+- [ ] gpg 密钥:迁移前在本机导出 DSF-backup 私钥并在软路由导入(否则加密备份无法解密)
+
 ## 二、必须随迁的数据目录（主 agent 记忆中枢）
 
 - [ ] `DSF-work/`（工作区 + docs/CHANGELOG + 记忆中枢 + projects/）
