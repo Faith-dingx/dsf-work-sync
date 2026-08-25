@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Gateway Config UI (port 3083)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{HOME}}/.hermes/node/bin/node {{WORKSPACE}}/projects/ai-gateway/config-ui/server.js
+WorkingDirectory={{WORKSPACE}}/projects/ai-gateway/config-ui
+Environment="CONFIG_DIR={{HOME}}/.dsh"
+Environment="PRESETS_DIR={{HOME}}/.dsh/.agent-presets"
+Environment="HOST=0.0.0.0"
+Environment="PORT=3083"
+Environment="PATH={{HOME}}/.hermes/node/bin:/usr/bin:/bin"
+Environment="HOME={{HOME}}"
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

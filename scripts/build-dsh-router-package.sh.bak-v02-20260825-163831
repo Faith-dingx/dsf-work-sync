@@ -19,29 +19,22 @@
 set -euo pipefail
 
 # ------------------------------------------------------------------ 配置区
-WORKSPACE="${WORKSPACE:-/home/dingx/DSF-work}"
-HARNESS_DIR="${HARNESS_DIR:-/home/dingx/deepseek-harness}"
-DEPLOY_DIR="$WORKSPACE/.temp/dsh-deploy-v2"          # 本次构建工作区(全新, 仅此目录允许 rm -rf)
+WORKSPACE=/home/dingx/DSF-work
+HARNESS_DIR=/home/dingx/deepseek-harness
+DEPLOY_DIR="$WORKSPACE/.temp/dsh-deploy-v2"          # 本次构建工作区(全新)
 OUTPUT_DIR="$WORKSPACE/.temp"
-VERSION="v0.1.3"                                      # 安装包版本 (v0.1.2 → v0.1.3)
+VERSION="v0.1.2"                                      # 安装包版本
 SCRIPT_VERSION="v0.2"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-BUILD_DATE="$(date +%Y-%m-%d)"
 PKG_NAME="dsh-router-install-$VERSION"
 PKG_DIR="$DEPLOY_DIR/$PKG_NAME"
 LOG="$DEPLOY_DIR/build-$VERSION-$TIMESTAMP.log"
-MANIFEST="$PKG_DIR/MANIFEST.txt"                      # 产物 MANIFEST (含 harness commit / 素材来源)
 ALPINE_IMG="alpine:3.20"
 NODE_VERSION="v22.23.2"
 NODE_VER_SHORT="22.23.2"
-# --- 素材系统 (B1/M1): example-settings 与 node 运行时的三级回退 ---
-# ① 工作区缓存/旧构建目录 → ② archive 旧包解包 → ③ settings.yaml 脱敏生成 (仅 example-settings)
 NODE_TARBALL="$WORKSPACE/.temp/dsh-deploy/downloads/node-$NODE_VERSION-linux-x64-musl.tar.xz"
 NODE_SHA256="2d18b5731055f7efa6c899004909b00ee110e38d3775745f60ec9ccf1f9982e7"
-OLD_PKG_DIR="$WORKSPACE/.temp/dsh-deploy"             # 素材一级来源(可不存在, 见 resolve_material)
-ARCHIVE_PKG="$WORKSPACE/.temp/archive/dsh-router-install-v0.1.2.tar.gz"   # 素材二级来源: 上一版成功包
-ARCHIVE_PREFIX="dsh-router-install-v0.1.2"            # 旧包内顶层目录名
-SETTINGS_SRC="$HOME/.dsh/settings.yaml"               # 素材三级来源: 本机生效配置 (脱敏后作模板)
+OLD_PKG_DIR="$WORKSPACE/.temp/dsh-deploy"             # 旧包(v0.1.1)素材: install.sh / init.d 模板
 HARNESS_COMMIT="$(cd "$HARNESS_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 # ------------------------------------------------------------------ 颜色/日志
@@ -69,11 +62,6 @@ check() {
 # =============================================================================
 preflight() {
     # 日志目录必须先于任何日志输出创建
-    # M2: rm -rf 仅允许清理本次构建工作区 (.temp/dsh-deploy*), 防止误伤 archive/旧包/其他
-    case "$DEPLOY_DIR" in
-        "$WORKSPACE"/.temp/dsh-deploy*) : ;;
-        *) die "DEPLOY_DIR 配置异常, 拒绝清理: $DEPLOY_DIR" ;;
-    esac
     rm -rf "$DEPLOY_DIR"; mkdir -p "$DEPLOY_DIR"
     : > "$LOG"
     log_info "启动 dsh 软路由安装包打包脚本 $SCRIPT_VERSION (安装包 $VERSION)"
@@ -85,117 +73,6 @@ preflight() {
     docker info >/dev/null 2>&1 || die "docker daemon 未运行 (严格验证需要)"
     docker image inspect "$ALPINE_IMG" >/dev/null 2>&1 || docker pull "$ALPINE_IMG" >/dev/null 2>&1 || die "无法获取镜像 $ALPINE_IMG"
     log_ok "前置检查完成"
-}
-
-# =============================================================================
-# 素材解析 (B1/M1): 三级来源回退, 三路皆缺时给出明确提示并 die
-#   resolve_material example-settings  → $PKG_DIR/install/example-settings.yaml
-#   resolve_material node-runtime      → $DEPLOY_DIR/node-src (已含 lib/ 兜底库)
-#   每一路成功都会记录来源到 $MATERIAL_LOG (供 MANIFEST 与执行日志引用)
-# =============================================================================
-MATERIAL_LOG="$DEPLOY_DIR/material-source.txt"
-MATERIAL_SOURCE_EXAMPLE="（未解析）"
-MATERIAL_SOURCE_NODE="（未解析）"
-
-resolve_material() {
-    local name="$1"
-    case "$name" in
-        example-settings) resolve_material_example_settings ;;
-        node-runtime)     resolve_material_node_runtime ;;
-        *) die "未知素材名: $name" ;;
-    esac
-}
-
-# --- B1-素材1: install/example-settings.yaml (三级回退) ---
-resolve_material_example_settings() {
-    local dest="$PKG_DIR/install/example-settings.yaml"
-    mkdir -p "$(dirname "$dest")"
-    # ① 工作区缓存 / 旧构建目录
-    if [ -f "$OLD_PKG_DIR/install/example-settings.yaml" ]; then
-        cp "$OLD_PKG_DIR/install/example-settings.yaml" "$dest"
-        MATERIAL_SOURCE_EXAMPLE="① 工作区缓存 $OLD_PKG_DIR/install/example-settings.yaml"
-        return 0
-    fi
-    # ② 旧包 archive 解包提取
-    if [ -f "$ARCHIVE_PKG" ] && tar -tzf "$ARCHIVE_PKG" "$ARCHIVE_PREFIX/install/example-settings.yaml" >/dev/null 2>&1; then
-        mkdir -p "$DEPLOY_DIR/mat-extract"
-        tar -xzf "$ARCHIVE_PKG" -C "$DEPLOY_DIR/mat-extract" --strip-components=2 \
-            "$ARCHIVE_PREFIX/install/example-settings.yaml" 2>>"$LOG" \
-            || die "从旧包提取 example-settings.yaml 失败: $ARCHIVE_PKG"
-        cp "$DEPLOY_DIR/mat-extract/example-settings.yaml" "$dest"
-        MATERIAL_SOURCE_EXAMPLE="② 旧包解包 $ARCHIVE_PKG (install/example-settings.yaml)"
-        return 0
-    fi
-    # ③ 从本机 ~/.dsh/settings.yaml 脱敏生成模板 (占位 key 结构参考旧模板注释格式)
-    if [ -f "$SETTINGS_SRC" ]; then
-        python3 - "$SETTINGS_SRC" "$dest" <<'PYEOF' >>"$LOG" 2>&1 || die "settings.yaml 脱敏生成模板失败"
-import sys, yaml, datetime
-
-src, dst = sys.argv[1], sys.argv[2]
-data = yaml.safe_load(open(src))
-if not isinstance(data, dict):
-    raise SystemExit("settings.yaml 顶层不是映射, 拒绝生成")
-
-# 深拷贝并脱敏: 任何疑似密钥的值 (key/token/secret/apiKey) 替换为占位符
-def mask(node, path=()):
-    if isinstance(node, dict):
-        out = {}
-        for k, v in node.items():
-            lk = str(k).lower()
-            keyish = any(t in lk for t in ("key", "token", "secret", "password", "apikey"))
-            if keyish and isinstance(v, str) and v:
-                out[k] = "******** (请填真实 key)"
-            else:
-                out[k] = mask(v, path + (k,))
-        return out
-    if isinstance(node, list):
-        return [mask(x, path) for x in node]
-    return node
-
-masked = mask(data)
-
-header = (
-    "# dsh 首启配置模板 (自动生成: v0.1.3 build)\n"
-    "# 安装后生效路径: /srv/dsh/home/settings.yaml  (DSH_HOME=/srv/dsh/home)\n"
-    "#\n"
-    "# ⚠️ 自动生成模板: 脱敏自本机运行配置 (~/.dsh/settings.yaml), 请填真实 key!\n"
-    "#    密钥不进包: 本文件不含任何真实 key。providers 用 apiKeyEnv 引用环境变量:\n"
-    "#    方式一: 编辑 /srv/dsh/home/settings.yaml 填入模型列表 (本文件即模板)\n"
-    "#    方式二: 建 /srv/dsh/home/dsh.env 并写入 (init 脚本 /etc/init.d/dsh 自动载入):\n"
-    "#        <APIKEY_ENV_NAME>=sk-xxxx\n"
-    "#    改完保存后重启服务: /etc/init.d/dsh restart\n"
-)
-with open(dst, "w") as f:
-    f.write(header)
-    yaml.safe_dump(masked, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
-print(f"[gen-template] {dst} 已生成 (脱敏自 {src}, {datetime.date.today()})")
-PYEOF
-        MATERIAL_SOURCE_EXAMPLE="③ 本机 ~/.dsh/settings.yaml 脱敏自动生成"
-        return 0
-    fi
-    die "素材缺失: example-settings.yaml 三级回退均不可用 (无工作区缓存 / 无旧包 $ARCHIVE_PKG / 无 $SETTINGS_SRC)"
-}
-
-# --- B1-素材2: node 运行时 (优先下载缓存, 下载/校验失败时复用旧包 node/) ---
-# 注: prepare_node 内先尝试缓存 tar.xz, 失败后调用本函数兜底 (旧包 node/ 已含 lib/ 兜底库)
-resolve_material_node_runtime() {
-    local NODE_SRC="$DEPLOY_DIR/node-src"
-    rm -rf "$NODE_SRC"; mkdir -p "$NODE_SRC"
-    if [ -f "$ARCHIVE_PKG" ] && tar -tzf "$ARCHIVE_PKG" "$ARCHIVE_PREFIX/node/bin/node" >/dev/null 2>&1; then
-        log_warn "下载缓存不可用 → 复用旧包 node/ 运行时 (B1 兜底)"
-        tar -xzf "$ARCHIVE_PKG" -C "$NODE_SRC" --strip-components=2 \
-            "$ARCHIVE_PREFIX/node" 2>>"$LOG" \
-            || die "从旧包提取 node/ 运行时失败: $ARCHIVE_PKG"
-        [ -x "$NODE_SRC/bin/node" ] || die "旧包提取后缺 node/bin/node"
-        # 复制后验证: musl node 在宿主机(glibc)无法直接运行, 用 alpine 容器真机验证
-        docker run --rm -v "$NODE_SRC:/srv/node:ro" -e LD_LIBRARY_PATH=/srv/node/lib \
-            "$ALPINE_IMG" sh -c '/srv/node/bin/node --version' >>"$LOG" 2>&1 \
-            || die "旧包 node 兜底容器验证失败 (node --version)"
-        MATERIAL_SOURCE_NODE="② 旧包解包 $ARCHIVE_PKG (node/, 含 lib/ 兜底库)"
-        log_ok "旧包 node 运行时就绪且容器内 node --version 通过"
-        return 0
-    fi
-    die "素材缺失: node 运行时下载失败且旧包 $ARCHIVE_PKG 不可用 (无 node/bin/node)"
 }
 
 # =============================================================================
@@ -359,40 +236,20 @@ PYEOF
 # =============================================================================
 prepare_node() {
     log_info "准备 musl node $NODE_VERSION ..."
-    local NODE_SRC="$DEPLOY_DIR/node-src"
-    local FROM_ARCHIVE=0
-    if [ -f "$NODE_TARBALL" ] \
-        && echo "$NODE_SHA256  $NODE_TARBALL" | sha256sum -c - >/dev/null 2>&1; then
-        log_info "使用本地缓存: $NODE_TARBALL (sha256 已校验)"
-        MATERIAL_SOURCE_NODE="① 本地缓存 $NODE_TARBALL"
-    elif [ ! -f "$NODE_TARBALL" ]; then
-        # 无缓存 → 尝试下载 (unofficial-builds, curl retry 3)
+    if [ ! -f "$NODE_TARBALL" ]; then
         log_warn "本地无 musl node 缓存, 尝试下载 (unofficial-builds)"
         mkdir -p "$(dirname "$NODE_TARBALL")"
-        if curl -fL --retry 3 -o "$NODE_TARBALL" \
+        curl -fL --retry 3 -o "$NODE_TARBALL" \
             "https://unofficial-builds.nodejs.org/download/release/$NODE_VERSION/node-$NODE_VERSION-linux-x64-musl.tar.xz" \
-            >>"$LOG" 2>&1 \
-            && echo "$NODE_SHA256  $NODE_TARBALL" | sha256sum -c - >/dev/null 2>&1; then
-            log_ok "musl node 下载成功且 sha256 校验通过"
-            MATERIAL_SOURCE_NODE="① 下载缓存 $NODE_TARBALL"
-        else
-            log_warn "musl node 下载失败或校验失败, 进入 B1 兜底 (复用旧包 node/)"
-            FROM_ARCHIVE=1
-        fi
-    else
-        log_warn "缓存 tar.xz 存在但 sha256 校验失败, 进入 B1 兜底 (复用旧包 node/)"
-        FROM_ARCHIVE=1
+            >>"$LOG" 2>&1 || die "musl node 下载失败"
     fi
+    echo "$NODE_SHA256  $NODE_TARBALL" | sha256sum -c - >/dev/null 2>&1 \
+        || die "musl node SHA-256 校验失败: $NODE_TARBALL"
 
-    if [ "$FROM_ARCHIVE" = 1 ]; then
-        resolve_material node-runtime
-        return 0
-    fi
-
-    # ---- 正常路径: 从 tar.xz 解包 ----
+    NODE_SRC="$DEPLOY_DIR/node-src"
     rm -rf "$NODE_SRC"; mkdir -p "$NODE_SRC"
     tar -xJf "$NODE_TARBALL" -C "$NODE_SRC" --strip-components=1
-    local BIN="$NODE_SRC/bin/node"
+    BIN="$NODE_SRC/bin/node"
     [ -x "$BIN" ] || die "musl node 解包后缺二进制"
 
     # strip (官方 musl 二进制未 strip)
@@ -401,7 +258,7 @@ prepare_node() {
     rm -rf "$NODE_SRC/include" "$NODE_SRC/share" "$NODE_SRC/CHANGELOG.md" "$NODE_SRC/README.md" 2>/dev/null || :
 
     # 附带 musl libstdc++ / libgcc_s (严格验证发现: node 依赖这两个库, 目标机未必预装)
-    local LIBC_DIR="$NODE_SRC/lib"
+    LIBC_DIR="$NODE_SRC/lib"
     mkdir -p "$LIBC_DIR"
     docker run --rm "$ALPINE_IMG" sh -c \
         'apk add --no-cache libstdc++ >/dev/null 2>&1; cp /usr/lib/libstdc++.so.6* /usr/lib/libgcc_s.so.1 /lib/ 2>/dev/null; ls /usr/lib/libstdc++.so.6* /usr/lib/libgcc_s.so.1 /lib/libgcc_s.so.1 2>/dev/null' \
@@ -423,19 +280,13 @@ assemble() {
 
     cp -a "$DEPLOY_DIR/app" "$PKG_DIR/app"
     cp -a "$DEPLOY_DIR/node-src" "$PKG_DIR/node"
-    # B1/M1: example-settings 素材三级回退 (缓存 → 旧包解包 → settings.yaml 脱敏生成)
-    resolve_material example-settings
-    # init.d/dsh 由下方 heredoc 完整生成, 无需从素材复制
-    log_info "素材来源: example-settings = $MATERIAL_SOURCE_EXAMPLE"
-    log_info "素材来源: node = $MATERIAL_SOURCE_NODE"
-    : > "$MATERIAL_LOG"
-    echo "example-settings: $MATERIAL_SOURCE_EXAMPLE" | tee -a "$MATERIAL_LOG"
-    echo "node: $MATERIAL_SOURCE_NODE" | tee -a "$MATERIAL_LOG"
+    cp "$OLD_PKG_DIR/install/example-settings.yaml" "$PKG_DIR/install/example-settings.yaml"
+    cp "$OLD_PKG_DIR/etc/init.d/dsh" "$PKG_DIR/etc/init.d/dsh"
 
-    # ---- 生成 install.sh (v0.1.3: 新增 LD_LIBRARY_PATH 启动 + libstdc++ 检测提示)
+    # ---- 生成 install.sh (v0.1.2: 新增 LD_LIBRARY_PATH 启动 + libstdc++ 检测提示)
     cat > "$PKG_DIR/install.sh" <<'SH'
 #!/bin/sh
-# dsh 软路由一键安装脚本 (dsh-router-install-v0.1.3)
+# dsh 软路由一键安装脚本 (dsh-router-install-v0.1.2)
 # 目标: ImmortalWrt / OpenWrt (BusyBox ash, root 运行)
 #
 # 用法: 解包后 cd <包目录> && ./install.sh
@@ -530,9 +381,9 @@ SH
     cat > "$PKG_DIR/etc/init.d/dsh" <<'SH'
 #!/bin/sh /etc/rc.common
 # dsh — DeepSeek Harness web 服务（软路由 AI 网关前端）
-# 来源: dsh-router-install-v0.1.3 安装包  版本: v0.1.3
+# 来源: dsh-router-install-v0.1.2 安装包  版本: v0.1.2
 #
-# v0.1.3: 启动命令注入 LD_LIBRARY_PATH (包内 musl libstdc++/libgcc_s 兜底);
+# v0.1.2: 启动命令注入 LD_LIBRARY_PATH (包内 musl libstdc++/libgcc_s 兜底);
 #         严格可执行性验证 (alpine musl 容器中验证过 node/dsh/web 启动);
 #         --trusted-host <LAN 网段> 保留 (特权方法信任, 默认 10.10.10.0/24,
 #         可用环境变量 DSH_TRUSTED_HOSTS 覆盖, 写入 /srv/dsh/home/dsh.env 或部署前导出)
@@ -585,11 +436,11 @@ SH
     cat > "$PKG_DIR/README.md" <<MD
 # dsh-router-install-$VERSION — dsh 软路由安装包
 
-DeepSeek Harness (dsh) 面向软路由/ImmortalWrt 的一键部署包 **$VERSION** ($BUILD_DATE)。
+DeepSeek Harness (dsh) 面向软路由/ImmortalWrt 的一键部署包 **$VERSION** (2026-08-24)。
 在软路由上以 **procd 服务** 挂载 dsh web 网关 (端口 **3080**)，局域网内手机/PC/电视盒子免安装浏览器直接使用。
 
 > 构建自 harness commit \`$HARNESS_COMMIT\` (feature/lan-access, web 前端含 LAN/remote 修复)。
-> **本包 (v0.1.3) 通过「严格可执行性检测」**：musl node 与 dsh 全程在 alpine (真实 musl libc)
+> **本包 (v0.1.2) 通过「严格可执行性检测」**：musl node 与 dsh 全程在 alpine (真实 musl libc)
 > 容器内以 \`/srv/dsh\` 双目录布局真机级验证 (node --version / dsh --version / dump-config / web HTTP 200)。
 
 ---
@@ -644,18 +495,15 @@ vi /srv/dsh/home/settings.yaml        # 填 provider/key，或建 /srv/dsh/home/
 | \`logread -e dsh\` | procd 系统日志 |
 | \`tail -f /var/log/dsh.log\` | dsh 应用日志 |
 
-## 5. v0.1.3 变更
+## 5. v0.1.2 变更
 
-1. **严格可执行性检测** (v0.2 起): 全部 shell 脚本 bash -n 语法校验; musl node 在 alpine
+1. **严格可执行性检测** (本版新增): 全部 shell 脚本 bash -n 语法校验; musl node 在 alpine
    (真实 musl) 容器中真机运行 node --version / dsh --version / dump-config / web 启动 HTTP 200;
    包内容按 \`/srv/dsh\` 目录布局组装后整体启动验证。
 2. **musl 库兜底**: 发现官方 musl node 依赖 libstdc++/libgcc_s (v0.1.1 未真机验证出此依赖),
    现随包附带 musl 版至 \`node/lib/\`, 启动命令注入 \`LD_LIBRARY_PATH\`, 目标机缺库也能启动。
-3. **web 前端重建**: 包含 08-23 LAN/remote 修复及 08-25 guard/tool-cordis 等最新 commit。
-4. **构建溯源**: 打包脚本 \`scripts/build-dsh-router-package.sh\` v$SCRIPT_VERSION, 产物带时间戳日志与 MANIFEST.txt
-   (记录 harness commit 与素材来源: example-settings / node 运行时三级回退)。
-5. **素材鲁棒性 (v0.1.3 修复)**: example-settings 模板与 musl node 运行时支持三级回退
-   (工作区缓存 → 旧包解包 → settings.yaml 脱敏生成), 不再依赖已删除的 .temp/dsh-deploy 素材目录。
+3. **web 前端重建**: 包含 08-23 LAN/remote 修复。
+4. **构建溯源**: 打包脚本 \`scripts/build-dsh-router-package.sh\` v$SCRIPT_VERSION, 产物带时间戳日志。
 
 ## 6. 已知限制
 
@@ -666,26 +514,7 @@ vi /srv/dsh/home/settings.yaml        # 填 provider/key，或建 /srv/dsh/home/
 4. **配置热更新**: 改 \`settings.yaml\`/\`dsh.env\` 后需 \`/etc/init.d/dsh restart\` 生效。
 MD
 
-    # ---- MANIFEST.txt (L1: harness commit + 素材来源 + 关键文件校验; 打包后回填 sha256)
-    cat > "$MANIFEST" <<MF
-# dsh-router-install-$VERSION MANIFEST
-# 生成时间: $TIMESTAMP
-harness-commit: $HARNESS_COMMIT
-package-version: $VERSION
-package-name: $PKG_NAME
-script-version: $SCRIPT_VERSION
-node-version: $NODE_VER_SHORT (linux-x64-musl)
-material-example-settings: $MATERIAL_SOURCE_EXAMPLE
-material-node-runtime: $MATERIAL_SOURCE_NODE
-nodes:
-  - app/lib/bin.js
-  - node/bin/node
-  - install/example-settings.yaml
-  - etc/init.d/dsh
-  - install.sh
-MF
-
-    log_ok "安装包目录组装完成 (MANIFEST.txt 已生成)"
+    log_ok "安装包目录组装完成"
 }
 
 # =============================================================================
@@ -705,9 +534,6 @@ strict_verify() {
     # 6.3 关键文件存在性
     check "app/lib/bin.js" test -x "$PKG_DIR/app/lib/bin.js"
     check "node/bin/node" test -x "$PKG_DIR/node/bin/node"
-    check "install/example-settings.yaml" test -s "$PKG_DIR/install/example-settings.yaml"
-    check "etc/init.d/dsh" test -x "$PKG_DIR/etc/init.d/dsh"
-    check "MANIFEST.txt" test -s "$MANIFEST"
 
     # 6.4 ELF 解释器 (musl)
     log_info "ELF 检查:"
@@ -777,32 +603,10 @@ strict_verify() {
 # =============================================================================
 package() {
     log_info "打包 tar.gz ..."
-    # 回填 MANIFEST 关键文件 sha256 (源文件在 DEPLOY_DIR, 需在打包 tar 前计算)
-    {
-        echo
-        echo "checksums:"
-        for f in app/lib/bin.js node/bin/node install/example-settings.yaml etc/init.d/dsh install.sh README.md MANIFEST.txt; do
-            sha256sum "$PKG_DIR/$f" 2>/dev/null | sed "s|$PKG_DIR/|  |"
-        done
-    } >> "$MANIFEST"
-
     ( cd "$DEPLOY_DIR" && tar czf "$OUTPUT_DIR/$PKG_NAME.tar.gz" "$PKG_NAME" )
     [ -s "$OUTPUT_DIR/$PKG_NAME.tar.gz" ] || die "tar 打包失败"
-    # sha256 of 最终包文件, 同时写入日志与顶层 MANIFEST
-    local PKG_SHA
-    PKG_SHA="$(sha256sum "$OUTPUT_DIR/$PKG_NAME.tar.gz" | awk '{print $1}')"
-    echo "$PKG_SHA  $OUTPUT_DIR/$PKG_NAME.tar.gz" | tee -a "$LOG"
-    {
-        echo
-        echo "archive:"
-        echo "  file: $PKG_NAME.tar.gz"
-        echo "  sha256: $PKG_SHA"
-        echo "  size-bytes: $(stat -c %s "$OUTPUT_DIR/$PKG_NAME.tar.gz")"
-    } >> "$MANIFEST"
-    # 顶层副本 (与包内一致, 便于构建侧直接查阅)
-    cp "$MANIFEST" "$OUTPUT_DIR/$PKG_NAME.MANIFEST.txt"
     log_ok "安装包已生成: $OUTPUT_DIR/$PKG_NAME.tar.gz"
-    log_ok "MANIFEST: $OUTPUT_DIR/$PKG_NAME.MANIFEST.txt"
+    sha256sum "$OUTPUT_DIR/$PKG_NAME.tar.gz" | tee -a "$LOG"
     log_info "包体积: $(du -sh "$OUTPUT_DIR/$PKG_NAME.tar.gz" | cut -f1) (解压后约 360M)"
     log_info "解压后包内大小: $(du -sh "$PKG_DIR" | cut -f1)"
 }

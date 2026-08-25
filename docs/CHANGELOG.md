@@ -1204,3 +1204,29 @@ pi-ai 目录中 DeepSeek/glm-5.2/hy3/kimi 等模型的 thinkingLevelMap 将 mini
 - DSF-work 文档入库: commit 6ba6dcc（78 文件 +16495/−743，含迁移清单/职责文档/审计报告/CHANGELOG），新增 .gitignore 排除 backup-*/archive/9888 json/.dsh-memory/**pycache**（误提交的 pyc 已 amend 剔除）；本地 commit 未 push
 - harness 确认: feature/lan-access 与 fork 两端同 HEAD 7f5954c2，工作树干净，未 push
 - 全程未删除任何源文件、未重启服务
+
+## 2026-08-25 dsh 软路由安装包 v0.1.3 重新打包
+
+- 任务: 修复 scripts/build-dsh-router-package.sh(v0.2) 缺陷并重新打包, 产出含最新 harness(7f5954c2) 的新包
+- 脚本修复 5 项(原脚本已备份 build-dsh-router-package.sh.bak-v02-20260825-163831):
+  - B1 素材三级回退: resolve_material_example_settings(缓存 → 旧包 archive 解包 → ~/.dsh/settings.yaml 脱敏生成) + resolve_material_node_runtime(下载失败复用旧包 node/); prepare_node 重构支持 FROM_ARCHIVE 兜底, 兜底后 alpine 容器验证 node --version
+  - B2 版本 v0.1.2 → v0.1.3: 同步 install.sh / etc/init.d/dsh / README heredoc 全部字面量 + 构建日期动态化
+  - M1 OLD_PKG_DIR 无保护 cp 改为素材解析函数, 三路皆缺即 die 并给出明确来源提示
+  - M2 preflight rm -rf 增加 case 保护: 仅允许清理 $WORKSPACE/.temp/dsh-deploy* (构建工作区), archive/旧包不受波及
+  - L1 MANIFEST.txt: 包内 + 顶层 .MANIFEST.txt 双份, 记录 harness-commit(7f5954c212)/素材来源/关键文件 sha256/包 sha256
+- 打包执行: 全流程一次通过, 严格可执行性检测 12 项全绿(node --version / dsh --version 0.1.1-rc.2 / dump-default-config DUMP-OK / web HTTP 200 + root div / ELF musl / 5 个 @deepseek-ai 闭包包 / bash -n)
+- 素材来源: example-settings=② 旧包解包(v0.1.2 archive); node=① 下载缓存(原本地无缓存, 本次下载成功, 缓存至 .temp/dsh-deploy/downloads/ 供下次复用)
+- 产物: .temp/dsh-router-install-v0.1.3.tar.gz 104041274 B, sha256 52976f0d14e6...9066524; 包内闭包含最新代码证据: dsh-tool-cordis allowMutation + dsh-guard-main-agent fail-open(0d6c793a04 晚于 v0.1.2 打包点 2096f422db, 确认增量已入包)
+- 清理: .temp 临时检查物全部删除, archive 与备份目录完好(rm -rf 保护验证有效); 全程未重启服务
+
+## 2026-08-25 可移植性改造 + 本地云端化备份准备
+
+- 任务：绝对路径参数化（本机零行为改变）+ git bundle 云端介质先行 + 敏感层 gpg 加密
+- 1a `scripts/adapt-machine-paths.sh` v1.0（新建）：迁移后一键适配；`bash scripts/adapt-machine-paths.sh <新工作区路径> <新IP|--keep-ip> [--dry-run]`；改 yaml 5 处 value 前缀（ws 作用域，不碰历史说明/注释示例）、打印 dsh-web/config-ui 新版单元片段（full 作用域，不写盘不执行 systemctl）、改打包脚本 WORKSPACE/HARNESS_DIR 两行；改前备份 `*.bak-适配-<时间戳>`；diff 摘要；旧值可用 OLD_* 环境变量覆盖；bash -n 通过，dry-run/write/keep-ip 三模式实测通过（.temp 副本验证后清理）
+- 1b `docs/service单元模板/`（新建）：dsh-web/config-ui 两个 .service.template（占位符 HOME/HARNESS_DIR/WORKSPACE/TRUSTED_HOSTS 替换硬编码）+ README 迁移用法（sed 替换 → daemon-reload 由用户执行）；运行中 systemd 单元未动（hash 不变）
+- 1c `scripts/build-dsh-router-package.sh` L22-23 参数化：`WORKSPACE="${WORKSPACE:-/home/dingx/DSF-work}"`、`HARNESS_DIR="${HARNESS_DIR:-...}"` 环境变量可覆盖，默认值保留（本机行为不变）；备份 `build-dsh-router-package.sh.bak-适配-20260825-165720`；bash -n + 环境变量覆盖实测通过
+- 1d `docs/可移植性与云端备份方案-20260825.md`（新建）：14 处主路径硬编码清单（yaml 5 + dsh-web 3 + config-ui 4 + 打包 2，含行号+内容+迁移动作）、2 处本机 IP（10.10.10.9/100.67.219.105 换机必改）、IP 三分类（10.10.10.2:9888 不变 / 本机 IP 必改 / 10.10.10.0/24 保留）、脚本用法、云端备份架构（harness fork=云端 / DSF-work bundle 先行 / 敏感层 gpg）、3 类备份恢复步骤、遗留风险
+- 任务2 bundle：`dsf-work-2026-08-25.bundle` 34,197,192 B，sha256 c1da2944d4b49b7e03289e28def7e3c7e09ca749f088b364a201c6eb9da71230；git bundle verify 通过（完整历史，HEAD 4734d35）；可上传任意云端/网盘，`git clone <bundle>` 即恢复
+- 任务3 gpg：本地生成无口令密钥 "DSF-backup <backup@local>"（rsa3072，仅存本机 gpg 环）；敏感层四源（settings.yaml/.credentials.yaml/~/.dsh/memory/sessions/query.sqlite）加密为 `encrypted/dsh-sensitive-2026-08-25.tar.gz.gpg` 48,412,476 B，sha256 490f2eee9af2a9c02a2b1bd89a1f851ac8b83c2918a11990fa73d66b27148304；`gpg -d | tar tzf -` 验证列出全部文件 OK；未打印任何密钥/凭据内容
+- MANIFEST：备份根新建 `.temp/backup-20260825/MANIFEST.txt`（bundle+加密包 sha256/字节数+恢复说明）；交付物快照入 `.temp/backup-20260825/deliverables/`（脚本/模板/手册/参数化后打包脚本+备份）
+- 全程零删除源文件、零重启、未改 .credentials.yaml/settings.yaml 内容、未动 systemd 单元

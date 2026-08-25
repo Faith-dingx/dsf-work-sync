@@ -11,7 +11,3 @@
 # Python 编译缓存
 __pycache__/
 *.pyc
-# 云推送方案 B：排除依赖与构建产物（2026-08-25，主 agent 授权）
-node_modules/
-.temp/dsh-deploy*/
-.temp/*.tar.gz
