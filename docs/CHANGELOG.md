@@ -1195,3 +1195,12 @@ pi-ai 目录中 DeepSeek/glm-5.2/hy3/kimi 等模型的 thinkingLevelMap 将 mini
 - 备份：docs/主agent可改写文件清单.yaml.bak-交互目录修复-20260825-155600
 - 修正：value 由不存在的 /home/dingx/与agent的交互目录/ → /home/dingx/DSF-work/与agent的交互目录/（reason 同步注明）
 - 验证：YAML 解析 OK（5 条白名单），guard-main-agent 下次 pre-execute 生效（src/index.ts L102），工作区无其他错误路径引用
+
+## 2026-08-25 全量备份快照（迁移软路由前最后保险）
+
+- 目标: `.temp/backup-20260825/full-20260825-155936/`（117M）
+- 清单（详见备份根 MANIFEST.txt）: settings.yaml + .credentials.yaml（600 权限保留、未明文打印）→ config/；.agent-presets 七目录（6 preset + full.bak 链）→ agent-presets.tar.gz；~/.dsh/memory → dsh-memory-home.tar.gz；工作区 .dsh-memory（替代不存在的 ~/.dsh-memory）→ dsh-memory-workspace.tar.gz；query.sqlite 116M（不打包 sessions/ 会话目录）→ sessions/
+- 校验: tar -tzf 三包全过；settings/credentials/query.sqlite 源==副本哈希一致；MANIFEST 逐项 sha256+字节数
+- DSF-work 文档入库: commit 6ba6dcc（78 文件 +16495/−743，含迁移清单/职责文档/审计报告/CHANGELOG），新增 .gitignore 排除 backup-*/archive/9888 json/.dsh-memory/**pycache**（误提交的 pyc 已 amend 剔除）；本地 commit 未 push
+- harness 确认: feature/lan-access 与 fork 两端同 HEAD 7f5954c2，工作树干净，未 push
+- 全程未删除任何源文件、未重启服务
