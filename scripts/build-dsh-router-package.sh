@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# dsh 软路由安装包打包脚本 v0.2
+# dsh 软路由安装包打包脚本 v0.3
 # 按当前 dsh 版本重新打包 + 严格可执行性检测（真机级 musl 验证）
 #
 # 目标产物:   dsh-router-install-<VERSION>.tar.gz  (ImmortalWrt / OpenWrt x86_64-musl)
@@ -12,6 +12,11 @@
 #             ④ ELF 解释器校验 (file 确认 ld-musl 动态链接)
 #             ⑤ 可执行位 / 关键文件存在性校验
 #             ⑥ libstdc++/libgcc_s 依赖随包携带 (musl 提取), LD_LIBRARY_PATH 兜底
+#   v0.3 起修复软路由 (ImmortalWrt/musl) 三个「启动即崩」问题 (v0.1.4 安装包)——
+#             A) 注入 musl 版 sharp 原生模块 (linuxmusl-x64), 修复 attachment 加载崩溃
+#             B) init 启动命令带 --expose-internals, 修复 HMR 服务构造崩溃
+#             C) --trusted-host 默认值改单 IP 自动探测, 修复 CIDR 网段非法崩溃
+#             另: install.sh 安装后做真实启动自检 (curl 探活 + 日志关键字)
 #
 # 用法: bash scripts/build-dsh-router-package.sh
 # 依赖: node>=18, pnpm, docker (daemon 运行), sha256sum, file, python3
@@ -23,8 +28,8 @@ WORKSPACE="${WORKSPACE:-/home/dingx/DSF-work}"
 HARNESS_DIR="${HARNESS_DIR:-/home/dingx/deepseek-harness}"
 DEPLOY_DIR="$WORKSPACE/.temp/dsh-deploy-v2"          # 本次构建工作区(全新, 仅此目录允许 rm -rf)
 OUTPUT_DIR="$WORKSPACE/.temp"
-VERSION="v0.1.3"                                      # 安装包版本 (v0.1.2 → v0.1.3)
-SCRIPT_VERSION="v0.2"
+VERSION="v0.1.4"                                      # 安装包版本 (v0.1.3 → v0.1.4: 修复 musl 三启动崩溃)
+SCRIPT_VERSION="v0.3"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 BUILD_DATE="$(date +%Y-%m-%d)"
 PKG_NAME="dsh-router-install-$VERSION"
@@ -355,6 +360,112 @@ PYEOF
 }
 
 # =============================================================================
+# 3b. musl 版 sharp 原生模块注入 (v0.1.4 修复 A)
+#     pnpm deploy 的闭包只带 glibc (linux-x64) 平台包; ImmortalWrt (musl) 加载
+#     二进制失败 -> attachment-local 插件挂载即崩 (Could not load the "sharp"
+#     module using the linuxmusl-x64 runtime). 此处把官方 musl 平台包注入
+#     .pnpm 闭包, 并在 sharp 主包实例 node_modules/@img 与顶层 @img 建相对
+#     symlink, 使 sharp 在 musl 下经 require("@img/sharp-linuxmusl-x64") 解析
+#     到 musl 二进制 (平台解析逻辑: sharp/dist/sharp.cjs 按 detect-libc 选 runtimePlatform).
+#     版本从闭包内已有 glibc 平台包动态读取, 避免硬编码; 素材优先本地缓存
+#     .temp/sharp-musl-check/, 缺失则从 npm registry 下载 (目标机无需 pnpm/npm).
+# =============================================================================
+inject_musl_sharp() {
+    log_info "注入 musl 版 sharp 原生模块 ..."
+    local NM="$DEPLOY_DIR/app/node_modules"
+    local PNPM="$NM/.pnpm"
+    local CACHE="$WORKSPACE/.temp/sharp-musl-check"
+    [ -d "$PNPM" ] || die "闭包无 .pnpm 目录, 无法注入 musl sharp"
+
+    # 从闭包内已有 glibc 平台包读取版本 (pnpm 实例目录名如 @img+sharp-linux-x64@0.35.3)
+    local gnu_dir gnu_ver vips_dir vips_ver
+    gnu_dir="$(ls -d "$PNPM"/@img+sharp-linux-x64@* 2>/dev/null | head -1 || true)"
+    [ -n "$gnu_dir" ] || die "闭包缺 glibc sharp 平台包 (@img+sharp-linux-x64@*), 注入中止"
+    gnu_ver="$(basename "$gnu_dir" | sed -n 's/^@img+sharp-linux-x64@//p')"
+    vips_dir="$(ls -d "$PNPM"/@img+sharp-libvips-linux-x64@* 2>/dev/null | head -1 || true)"
+    [ -n "$vips_dir" ] || die "闭包缺 glibc sharp-libvips 平台包 (@img+sharp-libvips-linux-x64@*), 注入中止"
+    vips_ver="$(basename "$vips_dir" | sed -n 's/^@img+sharp-libvips-linux-x64@//p')"
+    log_info "  sharp 闭包版本: sharp $gnu_ver + libvips $vips_ver (glibc)"
+
+    # 逐个注入 musl 平台包 (实体拷贝进 .pnpm 实例目录, 目录名沿用 pnpm 惯例 @img+<pkg>@<ver>)
+    # 参数: 包名(如 sharp-linuxmusl-x64) / 版本 / 本地 tarball 基名(如 img-sharp-linuxmusl-x64)
+    inject_one() {
+        local name="$1" ver="$2" tgz_base="$3"
+        local tgz="$CACHE/$tgz_base-$ver.tgz"
+        if [ ! -f "$tgz" ]; then
+            log_warn "本地缓存缺 $tgz_base-$ver.tgz, 尝试从 npm registry 下载 ..."
+            mkdir -p "$CACHE"
+            local url="https://registry.npmjs.org/@img/$name/-/$name-$ver.tgz"
+            if command -v curl >/dev/null 2>&1; then
+                curl -fsSL --retry 3 "$url" -o "$tgz" >>"$LOG" 2>&1 \
+                    || die "musl 平台包下载失败: $url (可手动放入 $CACHE/)"
+            elif command -v wget >/dev/null 2>&1; then
+                wget -q -O "$tgz" "$url" >>"$LOG" 2>&1 \
+                    || die "musl 平台包下载失败: $url (可手动放入 $CACHE/)"
+            else
+                die "本地无 curl/wget 且缺缓存 $tgz; 请手动下载 $url 放入 $CACHE/"
+            fi
+            log_ok "已下载 $name-$ver.tgz"
+        fi
+        local inst_root="$PNPM/@img+$name@$ver"
+        local dest="$inst_root/node_modules/@img/$name"
+        if [ ! -f "$dest/package.json" ]; then
+            local tmp
+            tmp="$(mktemp -d "$DEPLOY_DIR/inject-XXXXXX")"
+            tar -xzf "$tgz" -C "$tmp" 2>>"$LOG" || { rm -rf "$tmp"; die "musl 平台包解压失败: $tgz"; }
+            # 注入目标均位于构建工作区 ($DEPLOY_DIR) 内
+            rm -rf "$dest"
+            mkdir -p "$(dirname "$dest")"
+            cp -a "$tmp/package" "$dest"
+            rm -rf "$tmp"
+            log_ok "注入 $name@$ver -> ${dest#$DEPLOY_DIR/}"
+        else
+            log_info "  $name@$ver 已存在, 跳过"
+        fi
+    }
+    inject_one sharp-linuxmusl-x64 "$gnu_ver" img-sharp-linuxmusl-x64
+    inject_one sharp-libvips-linuxmusl-x64 "$vips_ver" img-sharp-libvips-linuxmusl-x64
+
+    # 关键: sharp musl 实例内要有 libvips 同级 symlink —— .node 二进制的 RPATH 首项
+    # $ORIGIN/../../sharp-libvips-linuxmusl-x64/lib 据此找到 libvips-cpp.so (与 pnpm
+    # 对 glibc 平台包的原生布局一致: @img+sharp-linux-x64@*/node_modules/@img 内同级链)
+    local musl_inst="$PNPM/@img+sharp-linuxmusl-x64@$gnu_ver/node_modules/@img"
+    if [ ! -e "$musl_inst/sharp-libvips-linuxmusl-x64" ]; then
+        ln -s "../../../@img+sharp-libvips-linuxmusl-x64@$vips_ver/node_modules/@img/sharp-libvips-linuxmusl-x64" \
+            "$musl_inst/sharp-libvips-linuxmusl-x64"
+        log_ok "链接 ${musl_inst#$DEPLOY_DIR/}/sharp-libvips-linuxmusl-x64"
+    fi
+
+    # 建 symlink: sharp 主包实例内 node_modules/@img + 顶层 node_modules/@img
+    local sharp_inst
+    sharp_inst="$(ls -d "$PNPM"/sharp@*/node_modules/@img 2>/dev/null | head -1 || true)"
+    [ -n "$sharp_inst" ] || die "闭包缺 sharp 主包实例 (sharp@*/node_modules/@img), 注入中止"
+    link_musl() {
+        local name="$1" ver="$2"
+        # sharp 实例内 (require 解析主路径): ../../../@img+$name@$ver/node_modules/@img/$name
+        if [ ! -e "$sharp_inst/$name" ]; then
+            ln -s "../../../@img+$name@$ver/node_modules/@img/$name" "$sharp_inst/$name"
+            log_ok "链接 ${sharp_inst#$DEPLOY_DIR/}/$name"
+        fi
+        # 顶层 @img (扁平覆盖层): ../.pnpm/@img+$name@$ver/node_modules/@img/$name
+        mkdir -p "$NM/@img"
+        if [ ! -e "$NM/@img/$name" ]; then
+            ln -s "../.pnpm/@img+$name@$ver/node_modules/@img/$name" "$NM/@img/$name"
+            log_ok "链接 ${NM#$DEPLOY_DIR/}/@img/$name"
+        fi
+    }
+    link_musl sharp-linuxmusl-x64 "$gnu_ver"
+    link_musl sharp-libvips-linuxmusl-x64 "$vips_ver"
+
+    # 注入后自查: musl 二进制 .node / libvips .so 必须存在
+    ls "$PNPM"/@img+sharp-linuxmusl-x64@*/node_modules/@img/sharp-linuxmusl-x64/lib/*.node >/dev/null 2>&1 \
+        || die "musl sharp 二进制缺失 (注入后自查失败)"
+    ls "$PNPM"/@img+sharp-libvips-linuxmusl-x64@*/node_modules/@img/sharp-libvips-linuxmusl-x64/lib/libvips-cpp.so* >/dev/null 2>&1 \
+        || die "musl libvips 缺失 (注入后自查失败)"
+    log_ok "musl 版 sharp 原生模块注入完成"
+}
+
+# =============================================================================
 # 4. musl node 运行时准备 (缓存 tar.xz -> strip -> 附带 libstdc++/libgcc_s)
 # =============================================================================
 prepare_node() {
@@ -435,7 +546,7 @@ assemble() {
     # ---- 生成 install.sh (v0.1.3: 新增 LD_LIBRARY_PATH 启动 + libstdc++ 检测提示)
     cat > "$PKG_DIR/install.sh" <<'SH'
 #!/bin/sh
-# dsh 软路由一键安装脚本 (dsh-router-install-v0.1.3)
+# dsh 软路由一键安装脚本 (dsh-router-install-v0.1.4)
 # 目标: ImmortalWrt / OpenWrt (BusyBox ash, root 运行)
 #
 # 用法: 解包后 cd <包目录> && ./install.sh
@@ -446,9 +557,13 @@ assemble() {
 #   4) 建首启配置骨架: /srv/dsh/home/settings.yaml (从模板复制, 密钥占位)
 #   5) node 自检 (musl; 若缺 libstdc++ 给出 opkg 指引)
 #   6) 安装并启用 dsh 服务 (/etc/init.d/dsh enable)
+#   7) 启动自检 (v0.1.4): 真实启动服务 + 探活 3080 + 日志崩溃关键字检查
 #
 # 注意: 密钥不进包; 首次使用请编辑 /srv/dsh/home/settings.yaml
 #       或建 /srv/dsh/home/dsh.env (AGNES_API_KEY / OPENCODE_GO_API_KEY ...)
+# v0.1.4 修复 (相对 v0.1.3): 内置 musl 版 sharp 原生模块 / init 启动带
+#       --expose-internals / --trusted-host 默认单 IP 自动探测 (不再用 CIDR) /
+#       本安装后启动自检
 
 PKG_DIR=$(cd "$(dirname "$0")" && pwd)
 APP_DIR=/srv/dsh/app
@@ -514,28 +629,63 @@ cp "$PKG_DIR/etc/init.d/dsh" "$DSH_INIT"
 chmod +x "$DSH_INIT"
 "$DSH_INIT" enable
 
+# 6) 启动自检 (v0.1.4): 真实启动 + 探活 + 日志崩溃关键字检查
+say "启动 dsh 服务并自检 (端口 3080) ..."
+"$DSH_INIT" start 2>&1 | sed 's/^/    /'
+HTTP_CODE=""
+i=0
+while [ "$HTTP_CODE" != "200" ] && [ "$i" -lt 30 ]; do
+	if command -v curl >/dev/null 2>&1; then
+		HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3080/ 2>/dev/null || true)"
+	else
+		wget -q -O /dev/null http://127.0.0.1:3080/ 2>/dev/null && HTTP_CODE=200 || HTTP_CODE=000
+	fi
+	[ "$HTTP_CODE" = "200" ] && break
+	i=$((i+1))
+	sleep 1
+done
+if [ "$HTTP_CODE" = "200" ]; then
+	say "启动自检通过: http://127.0.0.1:3080/ -> 200 (${i}s 内)"
+else
+	echo "[dsh-install] 启动自检失败 (HTTP=$HTTP_CODE). dsh.log 尾部:"
+	[ -f /var/log/dsh.log ] && tail -40 /var/log/dsh.log | sed 's/^/    /'
+	echo "[dsh-install] 常见原因与处理:"
+	echo "  a) 资源不足/端口占用: 查看 /var/log/dsh.log"
+	echo "  b) 日志出现 Could not load the \"sharp\" module 或 --expose-internals is required:"
+	echo "     安装包版本过旧 (需 v0.1.4+, 内置 musl sharp 与 --expose-internals)"
+	echo "  c) 日志出现 trustedHosts entry ... is not a bare host:port:"
+	echo "     在 $DSH_HOME/dsh.env 设 DSH_TRUSTED_HOSTS=<路由器单IP> 后 /etc/init.d/dsh restart"
+	exit 1
+fi
+
 cat <<EOF
 
 [dsh-install] 完成。首次使用请:
   1) 编辑 $SETTINGS_TARGET 填入模型 provider 与 key:
      - 或建 $DSH_HOME/dsh.env 导出环境变量 (AGNES_API_KEY / OPENCODE_GO_API_KEY)
-  2) 启动服务: /etc/init.d/dsh start
+  2) 服务已在运行: /etc/init.d/dsh start (启动自检已通过)
   3) 打开浏览器访问: http://<路由器IP>:3080
   日志: /var/log/dsh.log   开机自启: 已启用 (S95dsh)
 EOF
 SH
     chmod +x "$PKG_DIR/install.sh"
 
-    # ---- 更新 etc/init.d/dsh: 版本注记 + LD_LIBRARY_PATH + --trusted-host
+    # ---- 更新 etc/init.d/dsh: 版本注记 + LD_LIBRARY_PATH + --trusted-host 单IP + --expose-internals
     cat > "$PKG_DIR/etc/init.d/dsh" <<'SH'
 #!/bin/sh /etc/rc.common
 # dsh — DeepSeek Harness web 服务（软路由 AI 网关前端）
-# 来源: dsh-router-install-v0.1.3 安装包  版本: v0.1.3
+# 来源: dsh-router-install-v0.1.4 安装包  版本: v0.1.4
 #
-# v0.1.3: 启动命令注入 LD_LIBRARY_PATH (包内 musl libstdc++/libgcc_s 兜底);
-#         严格可执行性验证 (alpine musl 容器中验证过 node/dsh/web 启动);
-#         --trusted-host <LAN 网段> 保留 (特权方法信任, 默认 10.10.10.0/24,
-#         可用环境变量 DSH_TRUSTED_HOSTS 覆盖, 写入 /srv/dsh/home/dsh.env 或部署前导出)
+# v0.1.4 修复 (相对 v0.1.3, 软路由真机三个「启动即崩」):
+#   1) 启动命令带 --expose-internals —— HMR 服务 (cordis-plugin-hmr) 构造时
+#      需访问 Node 内部模块加载器; 无该 flag 且 node-addon-require-builtin 的
+#      glibc 原生绑定在 musl 上不可用时抛 "--expose-internals is required"。
+#   2) --trusted-host 默认值改单 IP 自动探测 —— dsh-client-connection 只接受
+#      裸 host[:port], 不接受 CIDR 网段; v0.1.3 默认 10.10.10.0/24 会启动崩溃。
+#   3) (配合) 包内已内置 musl 版 sharp 原生模块, 修复 attachment 加载崩溃。
+#
+# v0.1.3 保留: 启动命令注入 LD_LIBRARY_PATH (包内 musl libstdc++/libgcc_s 兜底);
+#         严格可执行性验证 (alpine musl 容器中验证过 node/dsh/web 启动)。
 #
 # 用法: /etc/init.d/dsh {start|stop|restart|reload|enable|disable|status}
 #   enable 即开机自启 (rc.common 建 /etc/rc.d/S95dsh)
@@ -554,8 +704,20 @@ NODE_DIR=/srv/dsh/node
 DSH_HOME=/srv/dsh/home
 DSH_HOST=0.0.0.0
 DSH_PORT=3080
-# 局域网信任网段 (特权方法 trusted host), 可用环境变量 DSH_TRUSTED_HOSTS / dsh.env 覆盖
-DSH_TRUSTED_HOSTS="${DSH_TRUSTED_HOSTS:-10.10.10.0/24}"
+# 局域网信任主机 (特权方法 --trusted-host, 只接受裸 host[:port], 不支持 CIDR 网段)
+# 优先级: dsh.env/环境变量 DSH_TRUSTED_HOSTS > 自动探测本机 LAN IP > 127.0.0.1(仅回环)
+# 注意: 探测到的是路由器自身的 IP; 客户端浏览器用哪个 IP 访问, 就需要信任哪个 IP,
+#       无法探测或需多 IP 时请在 /srv/dsh/home/dsh.env 显式设 DSH_TRUSTED_HOSTS。
+DSH_TRUSTED_HOSTS="${DSH_TRUSTED_HOSTS:-}"
+if [ -z "$DSH_TRUSTED_HOSTS" ]; then
+	# OpenWrt/ImmortalWrt 惯用法: uci 取 LAN 接口静态 IP (静态配置的局域网)
+	DSH_TRUSTED_HOSTS="$(uci get network.lan.ipaddr 2>/dev/null || true)"
+fi
+if [ -z "$DSH_TRUSTED_HOSTS" ] || [ "$DSH_TRUSTED_HOSTS" = "0.0.0.0" ]; then
+	# 兜底: ip 命令取本机全局 IPv4 (覆盖 DHCP 场景; 若命中 WAN 也仅放宽到该单 IP)
+	DSH_TRUSTED_HOSTS="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)"
+fi
+: "${DSH_TRUSTED_HOSTS:=127.0.0.1}"
 DSH_LOG=/var/log/dsh.log
 DSH_ENV_FILE=/srv/dsh/home/dsh.env
 # 包内 musl C++ 运行库兜底 (目标机未装 libstdc++6 时也能启动)
@@ -570,7 +732,7 @@ load_key_env() {
 start_service() {
 	load_key_env
 	procd_open_instance
-	procd_set_param command /bin/sh -c "cd '$APP_DIR' && exec '$NODE_DIR/bin/node' lib/bin.js web --host '$DSH_HOST' --port '$DSH_PORT' --trusted-host '$DSH_TRUSTED_HOSTS' >> '$DSH_LOG' 2>&1"
+	procd_set_param command /bin/sh -c "cd '$APP_DIR' && exec '$NODE_DIR/bin/node' --expose-internals lib/bin.js web --host '$DSH_HOST' --port '$DSH_PORT' --trusted-host '$DSH_TRUSTED_HOSTS' >> '$DSH_LOG' 2>&1"
 	procd_set_param cwd "$APP_DIR"
 	procd_set_param pidfile /var/run/dsh.pid
 	# respawn: 1h 内最多重启, 每次延迟 5s
@@ -600,9 +762,9 @@ DeepSeek Harness (dsh) 面向软路由/ImmortalWrt 的一键部署包 **$VERSION
 |---|---|
 | \`app/\` | dsh 运行闭包 (\`lib/bin.js\` 入口 + node_modules prod 依赖 + web 前端 + 全部插件) |
 | \`node/\` | Node.js **linux-x64-musl** v$NODE_VER_SHORT 官方运行时 (unofficial-builds, 已 strip) + **musl libstdc++/libgcc_s 兜底库** (\`node/lib/\`) |
-| \`install.sh\` | 一键安装脚本 (BusyBox ash, root 运行; 含 node 自检与 libstdc++ 提示) |
+| \`install.sh\` | 一键安装脚本 (BusyBox ash, root 运行; 含 node 自检 + 安装后真实启动自检) |
 | \`install/example-settings.yaml\` | 首启配置模板 (密钥占位, **不含任何真实 key**) |
-| \`etc/init.d/dsh\` | procd 开机自启服务脚本 (LD_LIBRARY_PATH 注入 + respawn 崩溃自愈) |
+| \`etc/init.d/dsh\` | procd 开机自启服务脚本 (LD_LIBRARY_PATH 注入 + \`--expose-internals\` + trusted-host 单IP自动探测 + respawn 崩溃自愈) |
 | \`README.md\` | 本文档 |
 
 **包体范围**：本包只含 dsh 自身前端与运行时，**不含** LLM 网关服务 (:9888) 等既有服务——它们是你路由器上已部署、dsh 通过 \`settings.yaml\` 的 \`router-9888\` provider 调用的现有基础设施。
@@ -657,13 +819,33 @@ vi /srv/dsh/home/settings.yaml        # 填 provider/key，或建 /srv/dsh/home/
 5. **素材鲁棒性 (v0.1.3 修复)**: example-settings 模板与 musl node 运行时支持三级回退
    (工作区缓存 → 旧包解包 → settings.yaml 脱敏生成), 不再依赖已删除的 .temp/dsh-deploy 素材目录。
 
+## 5a. v0.1.4 变更（软路由真机三崩溃修复，由 v0.1.3 实装反馈驱动）
+
+1. **内置 musl 版 sharp 原生模块**: v0.1.3 的闭包只带 glibc (\`linux-x64\`) 平台包,
+   ImmortalWrt (musl) 加载失败 → 启动即崩 (\`Could not load the "sharp" module using
+   the linuxmusl-x64 runtime\`)。v0.1.4 把 \`@img/sharp-linuxmusl-x64\` +
+   \`@img/sharp-libvips-linuxmusl-x64\` 官方 musl 包注入 \`.pnpm\` 闭包并建好
+   symlink（版本从闭包 glibc 包动态读取），sharp 在 musl 下可正常解析到二进制。
+2. **启动命令带 \`--expose-internals\`**: HMR 服务构造需访问 Node 内部模块加载器；
+   无该 flag 且 \`node-addon-require-builtin\` 的 glibc 绑定在 musl 上不可用时抛
+   \`--expose-internals is required for HMR service\` → 启动即崩。已内置该 flag。
+3. **\`--trusted-host\` 默认值改单 IP 自动探测**: dsh 只接受裸 \`host[:port]\`，
+   不接受 CIDR 网段；v0.1.3 默认 \`10.10.10.0/24\` 会在插件挂载时抛
+   \`not a bare host[:port] authority\` → 启动即崩。v0.1.4 自动探测本机 LAN IP
+   (\`uci get network.lan.ipaddr\` → \`ip\` 兜底)，可经 \`DSH_TRUSTED_HOSTS\` 环境变量/dsh.env 覆盖。
+4. **安装后真实启动自检**: \`install.sh\` 装完即 \`/etc/init.d/dsh start\` + curl 探活
+   :3080 + dsh.log 崩溃关键字检查，失败即停并给出处理指引（不再只做 node 版本自检）。
+
 ## 6. 已知限制
 
 1. **node-pty (musl) 未真机验证**: 终端/子进程类能力依赖原生模块, 需软路由真机确认; 不可用时
    浏览器内终端不可用 (web 对话/网关核心不受影响), 替代: ssh/ttyd (:7681)。
+   (sharp 已由 v0.1.4 内置 musl 版解决; 其他原生模块按需按平台裁剪)
 2. **体积**: 整包解压 ≈360M; 瘦身方向留给后续版本 (去未用 provider、prebuild 按平台裁剪)。
 3. **日志无轮转**: \`/var/log/dsh.log\` 持续增大; 可加 cron truncate 或 logrotate。
 4. **配置热更新**: 改 \`settings.yaml\`/\`dsh.env\` 后需 \`/etc/init.d/dsh restart\` 生效。
+5. **trusted-host 单 IP 探测的局限**: 探测到的是路由器自身 IP; 若浏览器用其他 IP 访问且需
+   特权方法, 请在 \`/srv/dsh/home/dsh.env\` 显式设 \`DSH_TRUSTED_HOSTS\`。
 MD
 
     # ---- MANIFEST.txt (L1: harness commit + 素材来源 + 关键文件校验; 打包后回填 sha256)
@@ -715,6 +897,20 @@ strict_verify() {
     file "$PKG_DIR/node/bin/node" | grep -q "ld-musl-x86_64" \
         || die "node 二进制不是 musl 动态链接 (预期 /lib/ld-musl-x86_64.so.1)"
 
+    # 6.4b v0.1.4 三崩溃修复的静态回归检查
+    # ① init 启动命令必须带 --expose-internals (HMR 服务构造要求)
+    check "init.d/dsh 含 --expose-internals" grep -q -- "--expose-internals" "$PKG_DIR/etc/init.d/dsh"
+    # ② init.d/dsh 不得再默认 CIDR 网段 (dsh 只接受裸 host[:port], CIDR 会启动崩溃)
+    #    只拦「默认赋值」形态, 注释里的历史说明不算 (文档可保留)
+    if grep -qE 'DSH_TRUSTED_HOSTS="\$\{DSH_TRUSTED_HOSTS:-10\.10\.10\.0/24\}"' "$PKG_DIR/etc/init.d/dsh"; then
+        log_fail "init.d/dsh 仍把 DSH_TRUSTED_HOSTS 默认值写成 CIDR 10.10.10.0/24 (dsh 拒绝网段, 启动即崩)"
+        exit 1
+    fi
+    log_ok "init.d/dsh 无 CIDR 默认值"
+    # ③ musl sharp 平台包已注入闭包 (两处 .node / .so 存在)
+    check "闭包 musl sharp .node" test -n "$(ls "$PKG_DIR"/app/node_modules/.pnpm/@img+sharp-linuxmusl-x64@*/node_modules/@img/sharp-linuxmusl-x64/lib/*.node 2>/dev/null | head -1)"
+    check "闭包 musl libvips .so" test -n "$(ls "$PKG_DIR"/app/node_modules/.pnpm/@img+sharp-libvips-linuxmusl-x64@*/node_modules/@img/sharp-libvips-linuxmusl-x64/lib/libvips-cpp.so* 2>/dev/null | head -1)"
+
     # 6.5 musl 真机级验证 (docker alpine, 真实 musl libc)
     log_info "musl 真机级验证 (docker $ALPINE_IMG):"
     local SROOT="/srv/dsh"
@@ -740,9 +936,19 @@ strict_verify() {
         -e LD_LIBRARY_PATH="$LDPATH" \
         "$ALPINE_IMG" sh -c 'apk add --no-cache libstdc++ >/dev/null 2>&1 || :; cd /srv/dsh/app && /srv/dsh/node/bin/node lib/bin.js --profile web --dump-default-config | head -c 100 >/dev/null && echo DUMP-OK'
 
-    # d) web 启动 + HTTP 200 (完整布局: app + node + home, 模拟 /srv/dsh; 在容器内 curl)
+    # d) musl sharp 原生模块加载 (v0.1.4 修复 A 的真机验证: 注入的 musl 平台包可被 sharp require)
+    check "musl sharp 原生模块加载" docker run --rm \
+        -v "$PKG_DIR/app:/srv/dsh/app:ro" \
+        -v "$PKG_DIR/node:/srv/dsh/node:ro" \
+        -e LD_LIBRARY_PATH="$LDPATH" \
+        "$ALPINE_IMG" sh -c 'apk add --no-cache libstdc++ >/dev/null 2>&1 || :; cd /srv/dsh/app && /srv/dsh/node/bin/node -e "const s = require(\"sharp\"); console.log(\"SHARP-OK\", s.versions.sharp)"'
+
+    # e) web 启动 + HTTP 200 + 进程稳定 (完整布局: app + node + home, 模拟 /srv/dsh; 在容器内 curl)
     #    DSH_HOME 用容器内路径 (dsh 首启自动初始化; 避免宿主目录 root 属主残留)
-    check "musl web 启动 + HTTP 200" docker run --rm \
+    #    v0.1.4: 启动命令带 --expose-internals (与 init.d/dsh 一致); HTTP 200 后继续等
+    #    15s 跨过 sharp/HMR 崩溃窗口, 确认进程存活 + 日志无崩溃关键字
+    #    (v0.1.3 的 sharp 崩溃表现为「先 200 后进程死」, 仅探活 200 不足以回归拦截)
+    check "musl web 启动 + HTTP 200 + 进程稳定" docker run --rm \
         -v "$PKG_DIR/app:/srv/dsh/app:ro" \
         -v "$PKG_DIR/node:/srv/dsh/node:ro" \
         -e DSH_HOME=/tmp/dshhome \
@@ -751,20 +957,29 @@ strict_verify() {
         "$ALPINE_IMG" sh -c '
             apk add --no-cache libstdc++ curl >/dev/null 2>&1 || :
             mkdir -p /tmp/dshhome
-            /srv/dsh/node/bin/node lib/bin.js web --host 127.0.0.1 --port 3099 --no-open >/tmp/dsh-web.log 2>&1 &
+            /srv/dsh/node/bin/node --expose-internals lib/bin.js web --host 127.0.0.1 --port 3099 --no-open >/tmp/dsh-web.log 2>&1 &
             WPID=$!
             ok=0
             for i in $(seq 1 40); do
                 code=$(curl -s -o /tmp/page.html -w "%{http_code}" http://127.0.0.1:3099/ 2>/dev/null || true)
                 [ "$code" = "200" ] && { ok=1; break; }
+                kill -0 $WPID 2>/dev/null || break
                 sleep 1
             done
-            kill $WPID 2>/dev/null || true
-            [ "$ok" = "1" ] || { echo "--- dsh-web.log ---"; tail -30 /tmp/dsh-web.log; exit 1; }
-            grep -q "<div id=\"root\">" /tmp/page.html && echo "WEB-HTTP-200-AND-ROOT-DIV-OK" || { echo "page missing root div"; exit 1; }
+            sleep 15
+            if ! kill -0 $WPID 2>/dev/null; then
+                echo "--- dsh-web.log (tail 40) ---"; tail -40 /tmp/dsh-web.log
+                echo "process died (sharp/HMR 崩溃窗口)"; exit 1
+            fi
+            [ "$ok" = "1" ] || { echo "--- dsh-web.log (tail 40) ---"; tail -40 /tmp/dsh-web.log; exit 1; }
+            grep -q "<div id=\"root\">" /tmp/page.html || { echo "page missing root div"; exit 1; }
+            if grep -qE "Could not load the .sharp. module|--expose-internals is required|not a bare host" /tmp/dsh-web.log; then
+                echo "--- 崩溃关键字命中 ---"; grep -E "Could not load the .sharp. module|--expose-internals is required|not a bare host" /tmp/dsh-web.log; exit 1
+            fi
+            echo "WEB-HTTP-200-STABLE-AND-NO-CRASH-KEYWORDS-OK"
         '
 
-    # e) 布局: app 顶层 node_modules 的 @deepseek-ai 关键包存在 (loader 解析前提)
+    # f) 布局: app 顶层 node_modules 的 @deepseek-ai 关键包存在 (loader 解析前提)
     for p in dsh-base dsh-web-app cordis-plugin-group schemastery node-addon-landlock-run; do
         check "闭包 @deepseek-ai/$p" test -e "$PKG_DIR/app/node_modules/@deepseek-ai/$p"
     done
@@ -813,6 +1028,7 @@ main() {
     build_web
     deploy_closure
     fixup_closure
+    inject_musl_sharp
     prepare_node
     assemble
     strict_verify
