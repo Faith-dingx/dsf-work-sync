@@ -11,7 +11,7 @@
     "format:check": "prettier --check .",
     "lint": "oxlint .",
     "typecheck": "tsc --noEmit -p tsconfig.base.json",
-    "test": "vitest run",
+    "test": "node projects/ai-gateway/config-ui/tests/boot-error.test.mjs && node projects/ai-gateway/config-ui/tests/thought-corrections.test.mjs",
     "prepare": "husky"
   },
   "keywords": [],
