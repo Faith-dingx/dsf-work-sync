@@ -1,0 +1,13 @@
+# DSF-work 根 .gitignore（2026-08-25 全量备份快照时建立）
+# 备份快照目录（不入库，由 MANIFEST.txt 校验）
+.temp/backup-*/
+# 历史归档（367M，不入库）
+.temp/archive/
+# 9888 网关大 json / 日志
+.temp/9888-*.json
+.temp/9888-refresh.log
+# 记忆系统插件数据（已由备份 tar.gz 覆盖，含待清理噪音 pending-suggestions.json）
+.dsh-memory/
+# Python 编译缓存
+__pycache__/
+*.pyc

@@ -1,0 +1,52 @@
+# 主agent可改写文件清单 v2.3
+# 读取方：@dsf/guard-main-agent 插件（plugin config 中指定清单路径）
+# 修订：2026-08-24 撤销宽泛 .sh 规则，主 agent 仅可读写文档文件；.sh 工具脚本归 code-agent 管理
+
+# 判断策略
+defaultPolicy: deny # fail-close：不匹配白名单则拒绝
+symlinkResolve: true # 判定前必须 resolve symlink，防绕过
+
+# 白名单（唯一权限来源）
+whitelist:
+  # 工作区文档（仅 *.md）
+  - type: prefix
+    value: '/home/dingx/DSF-work/docs/'
+    allowedExtensions: ['.md']
+    reason: '项目文档（仅markdown）'
+
+  - type: prefix
+    value: '/home/dingx/DSF-work/projects/*/docs/'
+    allowedExtensions: ['.md']
+    reason: '项目文档（仅markdown）'
+
+  - type: exact
+    value: '/home/dingx/DSF-work/projects/*/README.md'
+    reason: '项目自述'
+
+  # 临时文件区（类型受限）
+  - type: prefix
+    value: '/home/dingx/DSF-work/.temp/'
+    allowedExtensions: ['.md', '.txt', '.log', '.json']
+    reason: '临时文件区（仅文本/日志/JSON，禁止可执行脚本）'
+
+  # 与agent交互目录（任意类型）
+  - type: prefix
+    value: '/home/dingx/DSF-work/与agent的交互目录/'
+    reason: '与agent交互文档（任意类型），2026-08-25 修正：原路径 /home/dingx/与agent的交互目录/ 不存在导致规则失效，真实路径位于工作区下'
+
+# 动态白名单（用户授权时追加）
+dynamicWhitelist: []
+  # 示例：
+  # - type: prefix
+  #   value: "/home/dingx/other-project/docs/"
+  #   allowedExtensions: [".md"]
+  #   reason: "其他工作区文档"
+
+# 临时例外记录（用户明确要求编辑清单外文件时）
+temporaryOverrides: []
+  # 示例：
+  # - filePath: "/home/dingx/DSF-work/AGENTS.md"
+  #   userMessage: "帮我改一下AGENTS.md"
+  #   timestamp: "2026-08-21T18:00:00Z"
+  #   expiresAt: "2026-08-22T18:00:00Z"
+  #   by: "user-direct-request"
