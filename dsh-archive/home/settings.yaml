@@ -1,0 +1,515 @@
+agent-default-model:
+  provider: agnes-plan
+  model: agnes-3.0-flash
+agent-presets:
+  default: full
+permission:
+  defaultPreset: danger-full-access
+llm-pi-ai:
+  providers:
+    huoshan-code:
+      displayName: 火山Coding Plan
+      apiKeyEnv: HUOSHAN_CODE_API_KEY
+      api: openai-completions
+      baseURL: https://ark.cn-beijing.volces.com/api/coding/v3
+      models:
+        - id: deepseek-v4-flash
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+          contextWindow: 262144
+          maxTokens: 131072
+        - id: deepseek-v4-pro
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+          contextWindow: 262144
+          maxTokens: 131072
+        - id: kimi-k2.7-code
+          contextWindow: 262144
+        - id: glm-5.3
+          contextWindow: 524288
+        - id: doubao-seed-2.0-lite
+          contextWindow: 262144
+        - id: glm-5.3-flash
+          contextWindow: 524288
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+      compat:
+        supportsDeveloperRole: false
+    opencode:
+      api: openai-completions
+      apiKeyEnv: OPENCODE_GO_API_KEY
+      baseURL: https://opencode.ai/zen/go/v1
+      displayName: OpenCode Go（官方）
+      headers:
+        x-opencode-session: dsh-fixed-affinity-01
+      models:
+        - id: minimax-m3
+          name: go minimax-m3
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+          contextWindow: 524288
+          maxTokens: 131072
+        - id: minimax-m2.7
+          name: go minimax-m2.7
+          contextWindow: 204800
+        - id: minimax-m2.5
+          name: go minimax-m2.5
+          contextWindow: 204800
+        - id: kimi-k3
+          name: go kimi-k3
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+          contextWindow: 524288
+        - id: kimi-k2.7-code
+          name: go kimi-k2.7-code (代码专注)
+          contextWindow: 262144
+        - id: kimi-k2.6
+          name: go kimi-k2.6
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+          contextWindow: 262144
+        - id: kimi-k2.5
+          name: go kimi-k2.5
+          contextWindow: 262144
+        - id: glm-5.2
+          name: go glm-5.2
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+          contextWindow: 524288
+        - id: glm-5.3
+          name: go glm-5.3 (兜底)
+          contextWindow: 262144
+        - id: glm-5.1
+          name: go glm-5.1
+          contextWindow: 524288
+        - id: glm-5
+          name: go glm-5
+          contextWindow: 262144
+        - id: deepseek-v4-pro
+          name: go deepseek-v4-pro (L2备)
+          contextWindow: 524288
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+        - id: deepseek-v4-flash
+          name: go deepseek-v4-flash (L1日常)
+          contextWindow: 524288
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+        - id: qwen3.7-max
+          name: go qwen3.7-max
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            xhigh: xhigh
+          contextWindow: 262144
+        - id: qwen3.8-max
+          name: go qwen3.8-max
+          contextWindow: 262144
+        - id: qwen3.7-plus
+          name: go qwen3.7-plus
+          contextWindow: 262144
+        - id: qwen3.6-plus
+          name: go qwen3.6-plus
+          contextWindow: 262144
+        - id: qwen3.5-plus
+          name: go qwen3.5-plus
+          contextWindow: 262144
+        - id: mimo-v2-pro
+          name: go mimo-v2-pro
+          contextWindow: 262144
+        - id: mimo-v2-omni
+          name: go mimo-v2-omni
+          contextWindow: 262144
+        - id: mimo-v2.5-pro
+          name: go mimo-v2.5-pro
+          contextWindow: 524288
+        - id: mimo-v2.5
+          name: go mimo-v2.5
+          contextWindow: 524288
+        - id: hy3
+          name: go hy3
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+          contextWindow: 256000
+        - id: hy3-preview
+          name: go hy3-preview
+          contextWindow: 262144
+        - id: gpt-5.6-luna
+          name: go gpt-5.6-luna (L2主力)
+          contextWindow: 262144
+        - id: grok-4.5
+          name: go grok-4.5 (兜底)
+          contextWindow: 500000
+        - id: muse-spark-1.2
+          name: go muse-spark-1.2
+          contextWindow: 262144
+        - id: muse-spark-1.2-contributor
+          name: go muse-spark-1.2-contributor
+          contextWindow: 262144
+        - id: glm-5.3-flash
+          name: go glm-5.3-flash
+          contextWindow: 524288
+          maxTokens: 131072
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+      compat:
+        supportsDeveloperRole: false
+    opencode2:
+      api: openai-completions
+      apiKeyEnv: OPENCODE_GO2_API_KEY
+      baseURL: https://opencode.ai/zen/go/v1
+      displayName: OpenCode Go 账号2
+      models:
+        - id: minimax-m3
+          name: go minimax-m3
+          contextWindow: 524288
+          maxTokens: 131072
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+        - id: minimax-m2.7
+          name: go minimax-m2.7
+          contextWindow: 204800
+        - id: kimi-k3
+          name: go kimi-k3
+          contextWindow: 524288
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+        - id: kimi-k2.7-code
+          name: go kimi-k2.7-code (代码专注)
+          contextWindow: 262144
+        - id: glm-5.3
+          name: go glm-5.3 (兜底)
+          contextWindow: 262144
+        - id: qwen3.8-max
+          name: go qwen3.8-max
+          contextWindow: 262144
+        - id: mimo-v2.5-pro
+          name: go mimo-v2.5-pro
+          contextWindow: 524288
+        - id: mimo-v2.5
+          name: go mimo-v2.5
+          contextWindow: 524288
+        - id: hy3
+          name: go hy3
+          contextWindow: 256000
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+        - id: hy3-preview
+          name: go hy3-preview
+          contextWindow: 262144
+        - id: gpt-5.6-luna
+          name: go gpt-5.6-luna (L2主力)
+          contextWindow: 262144
+        - id: grok-4.5
+          name: go grok-4.5 (兜底)
+          contextWindow: 500000
+        - id: glm-5.3-flash
+          name: go glm-5.3-flash
+          contextWindow: 524288
+          maxTokens: 131072
+          reasoningEfforts:
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+        - id: longcat-2.0
+          contextWindow: 262144
+        - id: qwen3.8-flash
+          contextWindow: 262144
+        - id: hy4-preview
+          contextWindow: 262144
+        - id: grok-4.6
+          contextWindow: 500000
+        - id: deepseek-flash
+          contextWindow: 262144
+        - id: deepseek-v4.1-flash
+          contextWindow: 512576
+        - id: claude-fable-5
+          name: Claude Fable 5
+          contextWindow: 524288
+          maxTokens: 128000
+        - id: claude-opus-4-8
+          name: Claude Opus 4.8
+          contextWindow: 524288
+          maxTokens: 128000
+        - id: claude-opus-5
+          name: Claude Opus 5
+          contextWindow: 524288
+          maxTokens: 128000
+        - id: claude-sonnet-5
+          name: Claude Sonnet 5
+          contextWindow: 524288
+          maxTokens: 128000
+        - id: gemini-3.5-flash
+          name: Gemini 3.5 Flash
+          contextWindow: 524288
+          maxTokens: 65536
+        - id: gemini-3.5-flash-lite
+          name: Gemini 3.5 Flash Lite
+          contextWindow: 524288
+          maxTokens: 65536
+        - id: gemini-3.6-flash
+          name: Gemini 3.6 Flash
+          contextWindow: 524288
+          maxTokens: 65536
+        - id: big-pickle
+          name: Big Pickle
+          contextWindow: 200000
+          maxTokens: 32000
+        - id: deepseek-v4-flash
+          name: DeepSeek V4 Flash
+          contextWindow: 524288
+          maxTokens: 384000
+        - id: deepseek-v4-flash-free
+          name: DeepSeek V4 Flash Free
+          contextWindow: 200000
+          maxTokens: 128000
+        - id: deepseek-v4-pro
+          name: DeepSeek V4 Pro
+          contextWindow: 524288
+          maxTokens: 384000
+        - id: glm-5.2
+          name: GLM-5.2
+          contextWindow: 524288
+          maxTokens: 131072
+        - id: laguna-s-2.1-free
+          name: Laguna S 2.1 Free
+          contextWindow: 256000
+          maxTokens: 32000
+        - id: ling-3.0-flash-free
+          name: Ling-3.0-flash Free
+          contextWindow: 262144
+          maxTokens: 32768
+        - id: mimo-v2.5-free
+          name: MiMo V2.5 Free
+          contextWindow: 200000
+          maxTokens: 32000
+        - id: nemotron-3-ultra-free
+          name: Nemotron 3 Ultra Free
+          contextWindow: 524288
+          maxTokens: 128000
+        - id: north-mini-code-free
+          name: North Mini Code Free
+          contextWindow: 256000
+          maxTokens: 64000
+        - id: gpt-5.4-mini
+          name: GPT-5.4 Mini
+          contextWindow: 400000
+          maxTokens: 128000
+        - id: gpt-5.4-nano
+          name: GPT-5.4 Nano
+          contextWindow: 400000
+          maxTokens: 128000
+        - id: gpt-5.4-pro
+          name: GPT-5.4 Pro
+          contextWindow: 524288
+          maxTokens: 128000
+        - id: gpt-5.5-pro
+          name: GPT-5.5 Pro
+          contextWindow: 524288
+          maxTokens: 128000
+        - id: gpt-5.6-sol
+          name: GPT-5.6 Sol
+          contextWindow: 524288
+          maxTokens: 128000
+        - id: gpt-5.6-terra
+          name: GPT-5.6 Terra
+          contextWindow: 524288
+          maxTokens: 128000
+      headers:
+        x-opencode-session: dsh-hub-gui-0907
+      compat:
+        supportsDeveloperRole: false
+    agnes-plan:
+      displayName: Agnes Plan 套餐
+      apiKeyEnv: AGNES_PLAN_API_KEY
+      api: openai-completions
+      baseURL: https://apihub.agnes-ai.com/v1
+      models:
+        - id: agnes-3.0-flash
+          name: agnes-3.0-flash
+        - id: agnes-2.5-flash
+          name: agnes-2.5-flash
+        - id: agnes-2.0-flash
+          name: agnes-2.0-flash
+        - id: agnes-video-2.5-flash
+          name: agnes-video-2.5-flash
+        - id: agnes-video-v2.0
+          name: agnes-video-v2.0
+        - id: agnes-image-2.5-flash
+          name: agnes-image-2.5-flash
+        - id: agnes-image-2.1-flash
+          name: agnes-image-2.1-flash
+        - id: agnes-image-2.0-flash
+          name: agnes-image-2.0-flash
+    router-v1:
+      displayName: 软路由网关 /v1
+      apiKeyEnv: ROUTER_9888_API_KEY
+      api: openai-completions
+      baseURL: http://10.10.10.2:9888/v1
+      models:
+        - id: agnes/agnes-2.0-flash
+          name: agnes/agnes-2.0-flash
+        - id: agnes/agnes-2.5-flash
+          name: agnes/agnes-2.5-flash
+        - id: agnes/agnes-3.0-flash
+          name: agnes/agnes-3.0-flash
+        - id: agnes_cn/agnes-2.0-flash
+          name: agnes_cn/agnes-2.0-flash
+        - id: agnes_cn/agnes-2.5-flash
+          name: agnes_cn/agnes-2.5-flash
+        - id: agnes_cn/agnes-3.0-flash
+          name: agnes_cn/agnes-3.0-flash
+        - id: groq/allam-2-7b
+          name: groq/allam-2-7b
+        - id: groq/meta-llama/llama-prompt-guard-2-22m
+          name: groq/meta-llama/llama-prompt-guard-2-22m
+        - id: groq/meta-llama/llama-prompt-guard-2-86m
+          name: groq/meta-llama/llama-prompt-guard-2-86m
+        - id: groq/openai/gpt-oss-120b
+          name: groq/openai/gpt-oss-120b
+        - id: groq/openai/gpt-oss-20b
+          name: groq/openai/gpt-oss-20b
+        - id: groq/openai/gpt-oss-safeguard-20b
+          name: groq/openai/gpt-oss-safeguard-20b
+    router-v2:
+      displayName: 软路由网关 /v2
+      apiKeyEnv: ROUTER_9888_API_KEY
+      api: openai-completions
+      baseURL: http://10.10.10.2:9888/v2
+      models:
+        - id: deepseek/deepseek-v4-pro
+          name: deepseek/deepseek-v4-pro
+        - id: gongji/deepseek/deepseek-v4-flash
+          name: gongji/deepseek/deepseek-v4-flash
+        - id: gongji/deepseek/deepseek-v4-flash-0731
+          name: gongji/deepseek/deepseek-v4-flash-0731
+        - id: gongji/deepseek/deepseek-v4-pro
+          name: gongji/deepseek/deepseek-v4-pro
+        - id: gongji/deepseek/deepseek-v4-pro-0813
+          name: gongji/deepseek/deepseek-v4-pro-0813
+        - id: gongji/moonshotai/kimi-k2.6
+          name: gongji/moonshotai/kimi-k2.6
+        - id: gongji/moonshotai/kimi-k3
+          name: gongji/moonshotai/kimi-k3
+        - id: gongji/qwen/qwen3.7-max
+          name: gongji/qwen/qwen3.7-max
+        - id: gongji/tencent/hy3-preview
+          name: gongji/tencent/hy3-preview
+        - id: gongji/z-ai/glm-5
+          name: gongji/z-ai/glm-5
+    router-v3:
+      displayName: 软路由网关 /v3
+      apiKeyEnv: ROUTER_9888_API_KEY
+      api: openai-completions
+      baseURL: http://10.10.10.2:9888/v3
+      models:
+        - id: huoshan/doubao-seed-2.0-pro
+          name: huoshan/doubao-seed-2.0-pro
+        - id: huoshan/glm-5.2
+          name: huoshan/glm-5.2
+        - id: huoshan-code/deepseek-v4-flash
+          name: huoshan-code/deepseek-v4-flash
+        - id: huoshan-code/glm-5.3-flash
+          name: huoshan-code/glm-5.3-flash
+        - id: opencode/deepseek-flash@b
+          name: opencode/deepseek-flash@b
+        - id: opencode/deepseek-v4-flash@b
+          name: opencode/deepseek-v4-flash@b
+        - id: opencode/deepseek-v4-flash-vision-exp@b
+          name: opencode/deepseek-v4-flash-vision-exp@b
+        - id: opencode/deepseek-v4-pro@b
+          name: opencode/deepseek-v4-pro@b
+        - id: opencode/deepseek-v4.1-flash@b
+          name: opencode/deepseek-v4.1-flash@b
+        - id: opencode/glm-5@b
+          name: opencode/glm-5@b
+        - id: opencode/glm-5.1@b
+          name: opencode/glm-5.1@b
+        - id: opencode/glm-5.2@b
+          name: opencode/glm-5.2@b
+vision-router:
+  onboardingSeen: true
+  autoWrapProviders: false
+  desktopScreenshot: true
+ui-onboarding:
+  welcomeNoticeVersion: 2026-08-13.1
+llm-deepseek:
+  models:
+    - id: deepseek-flash
+      name: deepseek-flash
+      contextWindow: 1000000
+      inputModalities:
+        - text
+    - id: deepseek-v4-pro
+      name: DeepSeek-V4-Pro
+      contextWindow: 1000000
+      inputModalities:
+        - text
