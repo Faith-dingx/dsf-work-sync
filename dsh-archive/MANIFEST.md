@@ -22,9 +22,16 @@ git clone --depth 1 https://github.com/Faith-dingx/dsf-work-sync.git
 sh dsf-work-sync/dsh-archive/apply-install.sh [dsh根目录, 默认 /srv/dsh]
 ```
 脚本自动：备份目标机旧件 → 部署 home 配置层+presets+cordis.patch → config-ui 改造版 →
-init.d（token 占位需人工填目标机中枢 hub-token）→ ops 脚本 → 复用 node-pty apply.sh
+init.d（覆盖前自动备份 .pre-archive-restore）→ ops 脚本 → 复用 node-pty apply.sh
 （--no-restart 走全量部署）→ 统一重启 dsh/config-ui → 3080/3083 探活 + dmesg 段错误自检。
+
+参数（演练/特殊场景）：
+- `--no-etc`：跳过 /etc/init.d 部署（不碰目标机系统服务件）；
+- `--no-service-restart`：跳过服务重启；
+- `HUB_TOKEN_FILE=<目标机中枢 hubv2 data/hub-token 路径>`：自动把 init.d 的 DSH_HUB_SESSION_TOKEN
+  占位符填实；不给则保持占位符并提示人工填。
 前提：目标机已装官方 0.1.5 安装包（app/node 就位）+ x86_64/musl + root；key 池需先登记 9 个 provider env 键。
+演练已核（2026-09-24 假根全流程）：--no-etc --no-service-restart 下生产 /etc/init.d 与 dsh 服务零影响。
 
 ## 包内件清单（2026-09-24）
 ```
