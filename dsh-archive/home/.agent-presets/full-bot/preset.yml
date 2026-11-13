@@ -1,0 +1,3 @@
+name: 中枢驻场bot
+description: 多智能体对话中枢驻场 bot 专属 preset（2026-09-02 由 full-hub 克隆）：全工具集，文件写权限仅限中枢目录（bot-文件策略.yaml）；人格段由中枢设置界面维护。
+order: 2

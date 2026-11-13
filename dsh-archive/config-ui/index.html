@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>DSH 扩展配置界面</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ═══════════ 系统告警横幅 ═══════════ -->
+  <div id="alert-banner" class="alert-banner hidden" role="alert" aria-live="assertive">
+    <div class="alert-banner-content">
+      <span class="alert-banner-icon">⚠️</span>
+      <span id="alert-banner-msg" class="alert-banner-msg"></span>
+    </div>
+    <button type="button" id="alert-banner-dismiss" class="alert-banner-dismiss" aria-label="关闭告警">✕</button>
+  </div>
+
+  <!-- ═══════════ 登录视图 ═══════════ -->
+  <section id="view-login" class="view hidden">
+    <div class="login-wrap">
+      <div class="card login-card">
+        <h1 class="brand-title">DSH 扩展配置界面</h1>
+        <p class="subtitle">可视化配置模型服务 · 子代理 · 密钥</p>
+
+        <div id="first-boot-panel" class="hidden boot-panel">
+          <h3>首次启动</h3>
+          <p>检测到配置服务首次运行，已生成访问令牌。<b>令牌仅在本次显示一次</b>，请立即复制保存——其他设备或重新登录时需要使用。</p>
+          <div class="token-box">
+            <code id="boot-token" class="token-code"></code>
+            <button type="button" id="btn-copy-token" class="primary">复制</button>
+          </div>
+          <p class="hint">提示：令牌同时保存在服务器配置目录的 <code>.config-ui-token</code> 文件中，可在服务器上查看。</p>
+          <button type="button" id="btn-goto-wizard" class="primary wide">进入首次配置向导 →</button>
+        </div>
+
+        <form id="login-form" class="login-form" autocomplete="off">
+          <label for="login-token">访问令牌</label>
+          <input type="password" id="login-token" placeholder="粘贴访问令牌" autocomplete="off" spellcheck="false">
+          <button type="submit" class="primary wide">登 录</button>
+        </form>
+        <div id="login-msg" class="msg"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════ T4 首启向导（全屏） ═══════════ -->
+  <section id="wizard" class="wizard hidden" role="dialog" aria-modal="true" aria-label="首次配置向导">
+    <div class="wizard-card">
+      <header class="wizard-head">
+        <span class="wizard-title">首次配置向导</span>
+        <span class="wizard-progress" id="wz-progress">1 / 3</span>
+      </header>
+
+      <div class="wizard-body">
+        <!-- 步骤 1：模型路由网关地址 -->
+        <div class="wizard-step" data-step="1">
+          <h3>① 配置模型路由网关</h3>
+          <p class="wz-desc">dsh 的模型路由网关负责把请求转发到各模型服务。默认监听端口 <b>9888</b>，请确认下方地址可访问。</p>
+          <label class="field">
+            <span>网关地址</span>
+            <input type="text" id="wz-gateway" value="http://127.0.0.1:9888" spellcheck="false">
+          </label>
+          <p class="hint">本机调试：<code>http://127.0.0.1:9888</code>　·　软路由部署形态：<code>http://10.10.10.2:9888</code>（或你的网关 IP）</p>
+          <div class="wz-nav">
+            <button type="button" class="primary next" data-next="2">确认，下一步 →</button>
+          </div>
+        </div>
+
+        <!-- 步骤 2：模型服务名称 + 密钥 -->
+        <div class="wizard-step hidden" data-step="2">
+          <h3>② 添加第一个模型服务</h3>
+          <p class="wz-desc">填写至少一个模型服务提供方。API 密钥写入后仅以掩码形式显示，绝不回显完整值。</p>
+          <label class="field">
+            <span>服务名称</span>
+            <input type="text" id="wz-provider-name" placeholder="如 provider-a" spellcheck="false">
+          </label>
+          <label class="field">
+            <span>环境变量名（存密钥用）</span>
+            <input type="text" id="wz-env" placeholder="自动生成" spellcheck="false">
+          </label>
+          <label class="field">
+            <span>API 密钥</span>
+            <input type="password" id="wz-key" autocomplete="off" spellcheck="false" placeholder="粘贴 API 密钥">
+          </label>
+          <div class="wz-nav">
+            <button type="button" class="ghost prev" data-prev="1">← 上一步</button>
+            <button type="button" class="primary next" data-next="3">下一步 →</button>
+          </div>
+        </div>
+
+        <!-- 步骤 3：完成检测 -->
+        <div class="wizard-step hidden" data-step="3">
+          <h3>③ 完成检测</h3>
+          <div class="wz-summary" id="wz-summary"></div>
+          <button type="button" class="primary wide" id="wz-run-check">运行完成检测</button>
+          <div id="wz-check-result" class="msg"></div>
+          <div class="wz-nav">
+            <button type="button" class="ghost prev" data-prev="2">← 上一步</button>
+            <button type="button" class="primary wide hidden" id="wz-finish">进入主界面 →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════ 主视图 ═══════════ -->
+  <section id="view-main" class="view hidden">
+    <header class="topbar">
+      <div class="brand">DSH 扩展配置界面</div>
+      <nav class="tabs" id="tabs" aria-label="功能区">
+        <button type="button" class="tab" data-tab="providers">模型服务</button>
+        <button type="button" class="tab" data-tab="subagents">子代理</button>
+        <button type="button" class="tab" data-tab="keys">密钥</button>
+        <button type="button" class="tab" data-tab="status">状态</button>
+        <button type="button" class="tab" data-tab="config">主Agent</button>
+        <button type="button" class="tab" data-tab="rollback">回滚</button>
+      </nav>
+      <div class="topbar-right">
+        <span class="conn" id="conn-indicator" title="配置服务连接状态"><span class="dot" id="conn-dot"></span><span id="conn-text">已连接</span></span>
+        <button type="button" class="ghost" id="btn-logout">退出登录</button>
+      </div>
+    </header>
+
+    <main class="main">
+      <!-- ① 模型服务管理 -->
+      <section class="tab-pane" id="pane-providers">
+        <div class="pane-header">
+          <h2>模型服务</h2>
+          <span style="color:#fbbf24;font-size:13px">🔒 只读（统一到 key 库/9888 管理端）</span>
+        </div>
+          </form>
+        </div>
+        <div id="provider-list" class="card-list"></div>
+      </section>
+
+      <!-- ② 子代理管理 -->
+      <section class="tab-pane hidden" id="pane-subagents">
+        <div class="pane-header">
+          <h2>子代理管理</h2>
+          <div class="pane-actions">
+            <button type="button" class="primary" id="btn-subagent-add">＋ 添加子代理</button>
+            <button type="button" class="ghost" id="btn-subagent-refresh">刷新</button>
+          </div>
+        </div>
+        <p class="hint">「原厂」= 系统自带预设（未打标记）；「自定义」= 通过本页添加的子代理（目录含 <code>.config-ui-created</code> 标记）。修改 model / reasoningEffort 只更新目标标注字段，文件其余内容与注释原样保留。</p>
+        <div id="subagent-list" class="card-list"></div>
+        <p class="hint" id="subagent-catalog-hint"></p>
+        <div class="card form-card" id="guard-clf-card">
+          <h3>分类器模型（guard-main-agent）</h3>
+          <p class="hint">主编排 agent 守卫的廉价分类模型（走 9888 路由）。修改写入 full 预设（含 compaction 摘要与双 classifierModel 实例），<b>新会话挂载时生效</b>，存量会话保持旧模型。</p>
+          <label class="field">
+            <span>分类器模型 ID</span>
+            <input type="text" id="guard-clf-model" placeholder="如 agnes_cn/agnes-3.0-flash" spellcheck="false">
+          </label>
+          <button type="button" class="primary" id="btn-guard-clf-save">保存分类器模型</button>
+          <span id="guard-clf-note" class="hint"></span>
+        </div>
+      </section>
+
+      <!-- ③ 密钥管理 -->
+      <section class="tab-pane hidden" id="pane-keys">
+        <div class="pane-header">
+          <h2>密钥管理</h2>
+          <button type="button" class="ghost" id="btn-keys-refresh">刷新</button>
+        </div>
+        <!-- [20260923 user 令] key 唯一来源=boxinfo.db keys 表；本页只读，添加/修改/删除入口已移除 -->
+        <div class="card form-card" style="border:1px solid #b45309;background:#1f1608">
+          <h3 style="color:#fbbf24">🔒 密钥已统一到唯一库（boxinfo.db keys 表）</h3>
+          <p class="hint" style="color:#d1d5db">本页为只读视图。新增/修改/删除请到：<b>模型路由面板 http://10.10.10.2:9888/panel</b>（提供方→密钥），或由 agent 在 key 池操作。改动即刻对 DSH/Hermes/9888 三端生效（重启对应服务后）。</p>
+        </div>
+        <p class="hint" id="key-source-hint"></p>
+        <div id="key-list" class="card-list"></div>
+      </section>
+
+      <!-- ④ 状态卡片 -->
+      <section class="tab-pane hidden" id="pane-status">
+        <div class="pane-header">
+          <h2>状态</h2>
+          <button type="button" class="ghost" id="btn-status-refresh">刷新</button>
+        </div>
+        <div class="status-actions">
+          <button type="button" class="primary" id="btn-dsh-restart">重启 dsh 服务</button>
+          <span class="hint" style="margin-left:8px">重启 dsh 主服务（3080，当前 dsh 会话短暂断开，config-ui 不受影响）</span>
+        </div>
+        <div id="status-card" class="card status-card"></div>
+      </section>
+
+      <!-- ⑥ 主 Agent 配置 -->
+      <section class="tab-pane hidden" id="pane-config">
+        <div class="pane-header">
+          <h2>主 Agent 配置</h2>
+          <div class="pane-actions">
+            <button type="button" class="ghost" id="btn-config-refresh">刷新</button>
+          </div>
+        </div>
+        <p class="hint">主 Agent 的模型与权限设置、可改写文件白名单。子代理配置请用「子代理」页。修改后重启 dsh 生效。</p>
+
+        <!-- 全局设置 -->
+        <div class="card config-section">
+          <h3>主 Agent 模型与权限（新会话默认值）</h3>
+          <div class="config-row">
+            <label class="field">
+              <span>厂商（provider）</span>
+              <select id="cfg-default-provider"></select>
+            </label>
+            <label class="field">
+              <span>模型（按厂商联动）</span>
+              <select id="cfg-default-model"></select>
+            </label>
+            <label class="field">
+              <span>思考强度（reasoningEffort）</span>
+              <select id="cfg-default-effort"></select>
+            </label>
+            <label class="field">
+              <span>上下文窗口（tokens，留空=删除声明）</span>
+              <input id="cfg-context-window" type="number" min="4096" max="2097152" step="1" style="width:150px" placeholder="如 1048576">
+              <span id="cfg-context-window-meta" class="hint">声明值：—　生效值：—　来源：—</span>
+            </label>
+          </div>
+          <div class="config-row">
+            <label class="field">
+              <span>权限预设（源程序预设表）</span>
+              <select id="cfg-permission-preset">
+                <option value="">加载中…</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>默认 agent preset（新会话挂载的预设）</span>
+              <select id="cfg-default-preset">
+                <option value="">加载中…</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-actions" style="margin-top:12px">
+            <button type="button" class="primary" id="btn-save-settings">保存设置</button>
+            <span id="settings-save-status" class="sub-save-status"></span>
+          </div>
+        </div>
+
+        </div>
+
+        <!-- 白名单 -->
+        <div class="card config-section">
+          <h3>主agent白名单文件</h3>
+          <p class="hint">主agent可改写文件清单。编辑后保存即生效（文件每次写判定重读）。</p>
+          <textarea id="cfg-whitelist-content" class="whitelist-textarea" rows="12" spellcheck="false"></textarea>
+          <div class="form-actions" style="margin-top:12px">
+            <button type="button" class="primary" id="btn-save-whitelist">保存白名单</button>
+            <span id="whitelist-save-status" class="sub-save-status"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ⑤ 回滚（可执行操作） -->
+      <section class="tab-pane hidden" id="pane-rollback">
+        <div class="pane-header">
+          <h2>回滚</h2>
+          <button type="button" class="ghost" id="btn-rollback-refresh">刷新状态</button>
+        </div>
+        <p class="hint">每个组件可独立回滚。执行前系统会自动备份当前状态，回滚后需手动重启 dsh 生效。</p>
+
+        <!-- harness 回滚 -->
+        <div class="card rollback-section">
+          <h3>deepseek-harness（代码框架回滚）</h3>
+          <p class="hint">从历史版本记录中选择目标版本，默认 a336607bcb（feature/lan-access 分支之前）</p>
+          <div class="status-row" style="flex-direction:column;align-items:flex-start;gap:8px">
+            <label class="field" style="width:100%;max-width:600px">
+              <span>目标版本记录</span>
+              <select id="rollback-harness-select" style="width:100%">
+                <option value="">加载中…</option>
+              </select>
+            </label>
+            <button type="button" class="danger" id="btn-rollback-harness">回滚代码框架</button>
+          </div>
+          <div id="rollback-harness-result" class="msg hidden" style="margin-top:8px"></div>
+        </div>
+
+        <!-- cordis 回滚 -->
+        <div class="card rollback-section">
+          <h3>cordis 配置编排回滚</h3>
+          <p class="hint">恢复 agent.cordis.yml 到历史备份（请先选择备份文件）</p>
+          <div class="status-row" style="align-items:flex-start;gap:12px;flex-wrap:wrap">
+            <select id="rollback-cordis-select" class="select" style="flex:1;min-width:300px;padding:6px">
+              <option value="">加载中…</option>
+            </select>
+            <button type="button" class="danger" id="btn-rollback-cordis">回滚配置编排</button>
+          </div>
+          <div id="rollback-cordis-result" class="msg hidden" style="margin-top:8px"></div>
+        </div>
+
+        <!-- 凭据回滚 -->
+        <div class="card rollback-section">
+          <h3>凭据密钥文件回滚</h3>
+          <p class="hint">恢复 .credentials.yaml 到历史备份</p>
+          <div class="status-row" style="align-items:flex-start;gap:12px;flex-wrap:wrap">
+            <select id="rollback-cred-select" class="select" style="flex:1;min-width:300px;padding:6px">
+              <option value="">加载中…</option>
+            </select>
+            <button type="button" class="danger" id="btn-rollback-credentials">回滚凭据密钥</button>
+          </div>
+          <div id="rollback-credentials-result" class="msg hidden" style="margin-top:8px"></div>
+        </div>
+
+        <!-- 记忆回滚 -->
+        <div class="card rollback-section">
+          <h3>记忆文件回滚</h3>
+          <p class="hint">恢复到 <code>~/.dsh/memory-backup/latest/</code> 的最新快照（包含用户记忆 MEMORY.md、用户档案 USER.md、项目记忆 projects-DSF-work.md）</p>
+          <button type="button" class="danger" id="btn-rollback-memory">回滚记忆文件</button>
+          <div id="rollback-memory-result" class="msg hidden" style="margin-top:8px"></div>
+        </div>
+
+        <!-- 一键全量回滚 -->
+        <div class="card rollback-section" style="border-color:var(--danger)">
+          <h3>一键全量回滚</h3>
+          <p class="hint"><strong>危险操作：</strong>同时回滚代码框架 + 配置编排 + 凭据 + 记忆，回滚后需重启 dsh。具体回滚版本见下方提示。</p>
+          <div class="status-row" style="align-items:center;gap:12px">
+            <button type="button" class="danger" id="btn-rollback-all">执行一键全量回滚</button>
+            <span class="hint" id="rollback-all-hint">系统会先自动备份当前状态，再执行回滚</span>
+          </div>
+          <div id="rollback-all-result" class="msg hidden" style="margin-top:8px"></div>
+        </div>
+
+        <!-- 状态区 -->
+        <div id="rollback-status" class="card status-card" style="margin-top:12px"></div>
+      </section>
+    </main>
+  </section>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <!-- ═══════════ 添加子代理弹窗 ═══════════ -->
+  <div id="add-subagent-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-label="添加子代理">
+    <form id="add-subagent-form" class="modal-card" autocomplete="off">
+      <h3>添加子代理</h3>
+      <p class="modal-desc">基于原厂模板复制或空白新建，写入服务器预设目录，覆盖原厂/自定义标记为本页创建（自定义）。</p>
+      <label class="field">
+        <span>名称（id：小写字母/数字/短横线）</span>
+        <input type="text" id="add-id" placeholder="如 my-agent" spellcheck="false" required>
+      </label>
+      <label class="field">
+        <span>来源</span>
+        <select id="add-source">
+          <option value="template">复制原厂模板</option>
+          <option value="blank">空白自定义</option>
+        </select>
+      </label>
+      <label class="field" id="add-template-field">
+        <span>模板（原厂预设 id）</span>
+        <select id="add-template"></select>
+      </label>
+      <label class="field">
+        <span>模型服务（厂商）</span>
+        <select id="add-provider" required></select>
+      </label>
+      <label class="field">
+        <span>模型（下拉选择或手输）</span>
+        <input type="text" id="add-model" list="dl-add-models" placeholder="输入或选择模型 id" spellcheck="false" required>
+        <datalist id="dl-add-models"></datalist>
+      </label>
+      <p class="hint" id="model-catalog-hint"></p>
+      <label class="field">
+        <span>推理强度 reasoningEffort</span>
+        <select id="add-effort">
+          <option value="off">off</option>
+          <option value="low" selected>low</option>
+          <option value="high">high</option>
+          <option value="max">max</option>
+        </select>
+      </label>
+      <div class="modal-msg" id="add-modal-msg"></div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="btn-add-cancel">取消</button>
+        <button type="submit" class="primary">创建</button>
+      </div>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
