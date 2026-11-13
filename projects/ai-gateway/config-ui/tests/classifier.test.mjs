@@ -90,7 +90,7 @@ function freshFile(template) {
 
 const yaml = (() => {
   try {
-    return require('/home/dingx/deepseek-harness/node_modules/js-yaml')
+    return require('/home/dingx/dsh-022-pretest/node_modules/js-yaml')
   } catch {
     return null
   }

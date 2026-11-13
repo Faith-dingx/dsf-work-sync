@@ -122,10 +122,10 @@ async function settingsFilePath() {
 }
 // 回滚审计面（对应 rollback.sh）：备份一律位于 $CONFIG_DIR（生产即 ~/.dsh：
 // .agent-presets/full/*.bak-*、.credentials.yaml.bak-*、memory-backup/latest/）；
-// harness 仓库默认 /home/dingx/deepseek-harness，可用 ROLLBACK_HARNESS_DIR / HARNESS_DIR 覆盖
+// harness 仓库默认 /home/dingx/dsh-022-pretest，可用 ROLLBACK_HARNESS_DIR / HARNESS_DIR 覆盖
 // （受控测试注入 dummy 仓库，绝不触碰真实仓库）。
 const HARNESS_DIR =
-  process.env.ROLLBACK_HARNESS_DIR || process.env.HARNESS_DIR || '/home/dingx/deepseek-harness';
+  process.env.ROLLBACK_HARNESS_DIR || process.env.HARNESS_DIR || '/home/dingx/dsh-022-pretest';
 // 原厂凭据文档：dsh-credentials-local 读写的 $DSH_HOME/.credentials.yaml。
 // 真实机制：dsh 凭据解析顺序 = 继承环境 → $DSH_HOME/.credentials.yaml
 //           → 调用目录 .env → $DSH_HOME/.env（低优先级后备；受管文档不物化进 process.env）。
@@ -150,7 +150,7 @@ try {
   // 允许通过 npm_config 或绝对路径拿到仓库内 js-yaml
   const candidates = [
     process.env.JS_YAML_PATH,
-    '/home/dingx/deepseek-harness/node_modules/js-yaml',
+    '/home/dingx/dsh-022-pretest/node_modules/js-yaml',
     '/srv/dsh/node/node_modules/js-yaml',
     '/mnt/hermes/dsh/app/node_modules/js-yaml', // 本机（路由器）DSH 自带 js-yaml（2026-09-10 补：.9 之外的主机也能解析）
   ].filter(Boolean);
@@ -337,9 +337,9 @@ async function getProviders() {
 
 /** pi-ai 内置目录候选（ESM 包，Node ≥22.12 支持 require(ESM)；前两位失败则依次兜底，fail-open）。 */
 const PIAI_CANDIDATES = [
-  '/home/dingx/deepseek-harness/node_modules/.pnpm/@earendil-works+pi-ai@0.82.1_@modelcontextprotocol+sdk@1.29.0_zod@4.4.3__ws@8.21.0_zod@4.4.3/node_modules/@earendil-works/pi-ai/dist/providers/all.js',
+  '/home/dingx/dsh-022-pretest/node_modules/.pnpm/@earendil-works+pi-ai@1.3.0_patch_hash=4e1c90fd00aea42989664504668633033c1962e53c078609_43f55fd5cdebc7965cd56b71408d4583/node_modules/@earendil-works/pi-ai/dist/providers/all.js',
   process.env.PIAI_ALL_PATH,
-  '/home/dingx/deepseek-harness/node_modules/@earendil-works/pi-ai/dist/providers/all.js',
+  '/home/dingx/dsh-022-pretest/node_modules/@earendil-works/pi-ai/dist/providers/all.js',
 ].filter(Boolean);
 
 let piAiCatalogCache = null;

@@ -129,7 +129,7 @@ function parsePatchYaml(text, fileLabel) {
   try {
     const candidates = [
       process.env.JS_YAML_PATH,
-      '/home/dingx/deepseek-harness/node_modules/js-yaml',
+      '/home/dingx/dsh-022-pretest/node_modules/js-yaml',
       '/home/dingx/dsh-022-pretest/node_modules/js-yaml',
     ].filter(Boolean);
     for (const c of candidates) {
