@@ -11,7 +11,7 @@ defaultPolicy: allow # 2026-10-29：默认放行（原 deny）
 symlinkResolve: true # 判定前必须 resolve symlink，防绕过
 
 # ✅ 生效状态（2026-11-13 实测复核，取代 2026-10-29 的「代码不支持」结论）：
-#   现行 guard 实现（dsh-022-pretest packages/extensions/guard-main-agent/src/filePolicy.ts）
+#   现行 guard 实现（dsh packages/extensions/guard-main-agent/src/filePolicy.ts）
 #   已完整支持 v3.0：① blacklist 先判定、命中即无条件拒（优先于 whitelist）；
 #   ② 白名单未命中且无生效临时例外时，按 defaultPolicy 判定（allow=放行 / deny=fail-close）。
 #   证据：tests/file-policy.spec.ts「v3.0 策略：defaultPolicy allow + blacklist」用例随全包 160 项全绿；
@@ -47,8 +47,8 @@ blacklist:
     value: '/home/dingx/DSF-work/.git/'
     reason: '版本库内部对象，防不可逆损坏'
   - type: prefix
-    value: '/home/dingx/dsh-022-pretest/.git/'
-    reason: '版本库内部对象，防不可逆损坏（2026-11-13：运行时仓由 deepseek-harness 迁至 dsh-022-pretest）'
+    value: '/home/dingx/dsh/.git/'
+    reason: '版本库内部对象，防不可逆损坏（2026-11-13：运行时仓由 deepseek-harness 迁至 dsh（2026-11-13 rc.3 升级后定名））'
 
   # —— 工具脚本与系统层 ——
   - type: prefix
@@ -128,7 +128,7 @@ whitelist:
     value: '/home/dingx/.dsh/settings.yaml'
     reason: 'settings 配置（2026-09-10 用户授权）'
   - type: prefix
-    value: '/home/dingx/dsh-022-pretest/packages/'
+    value: '/home/dingx/dsh/packages/'
     reason: '源码应急热修（2026-09-10 用户授权；2026-11-13 仓路径随 0.2.2 运行时仓更新；实质实施仍优先 P2，改后强制 P3）'
   - type: prefix
     value: '/home/dingx/DSF-work/projects/'

@@ -66,7 +66,7 @@ OLD_IP2="${OLD_IP2:-100.67.219.105}"
 
 # 新值默认推导: 新 HOME/HARNESS 与新工作区同级父目录对齐
 NEW_HOME="${NEW_HOME:-$(dirname "$NEW_WORKSPACE")}"
-NEW_HARNESS="${NEW_HARNESS:-$(dirname "$NEW_WORKSPACE")/dsh-022-pretest}"
+NEW_HARNESS="${NEW_HARNESS:-$(dirname "$NEW_WORKSPACE")/dsh}"
 if [ "$NEW_IP" = "--keep-ip" ]; then
   NEW_IP1="$OLD_IP1"; NEW_IP2="$OLD_IP2"; KEEP_IP=1
 else

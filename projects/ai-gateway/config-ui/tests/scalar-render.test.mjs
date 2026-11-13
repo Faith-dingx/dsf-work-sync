@@ -17,7 +17,7 @@ const require = createRequire(import.meta.url)
 const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.js')
 const JS_YAML = [
   process.env.JS_YAML_PATH,
-  '/home/dingx/dsh-022-pretest/node_modules/js-yaml',
+  '/home/dingx/dsh/node_modules/js-yaml',
   '/srv/dsh/node/node_modules/js-yaml',
 ].filter(Boolean).find((c) => {
   try {

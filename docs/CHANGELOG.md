@@ -1559,3 +1559,17 @@ pi-ai 目录中 DeepSeek/glm-5.2/hy3/kimi 等模型的 thinkingLevelMap 将 mini
 - 落地方式：走 profile 的 pnpm patchedDependencies（/home/dingx/.dsh/profiles/web/patches/@a9i5k4__dsh-auto-memory@3.3.17.patch，5189 字节），pnpm patch-commit 已重新应用并验证生效（运行态 lib/index.js 含新逻辑、ritual-inspection-unavailable 零残留）。备份：lib/index.js.bak-ritual-fix-20260713-1810、patch 源 .bak-ritual-fix-20260713-1810。
 - 同步固化：patch 副本入版本库 dsh-archive/patches/（便于迁移到 2 号机时复用）。
 - 待用户执行：重启 dsh-web 使新插件代码进进程（重启一律由用户执行）。
+
+## 2026-11-13（20:50-21:00）rc.3 迁移后全机自检 + 路径残留修正
+
+- 背景：用户完成 DSH 0.2.2-rc.3 升级并把运行时仓由 `~/dsh-022-pretest`（rc.2 线）迁到 `~/dsh`（rc.3 + 用户自改合并基线，git 干净，HEAD b544f96dbf）；旧线封存 `~/dsh-archive-rc2-20261113`（2.9G，含全部历史提交，保留作回滚，`~/bin/rollback.sh` 已指向它）。systemd 单元的 ExecStart/WorkingDirectory 已指向新仓。
+- 自检结果：dsh-web/config-ui 均 active，3080/3081/3083/9400 全通，9888 200，2 号机 3080 在服务；dsh-web 近 30 分钟 0 错误、config-ui 0 错误；**接续仪式修复已确认生效**（今日 ritual-inspection-unavailable 0 次，插件含新逻辑）；接续仪式弹窗根因修复与 pnpm patch 均在位。
+- 发现并修正的迁移遗留（全部先备份 .bak-rc3-path-20261113-205517）：
+  ①**guard 策略清单 blacklist 仍指旧仓**（`docs/主agent可改写文件清单.yaml`）→ 新仓 `~/dsh` 的 `.git/` 与 `packages/` 当时完全不在保护范围（清单里 0 处提到新仓）→ 已改指新仓，恢复防不可逆损坏保护；
+  ②profile 依赖断链：`~/.dsh/profiles/web/{package.json,pnpm-workspace.yaml,pnpm-lock.yaml}` 的 file: 依赖与 `cordis.patch.yml` 的 tsserver 路径仍指旧仓（`dsh-lsp`/`dsh-terminal` 在 node_modules 已不存在，其余为旧仓实体副本）→ 已全部改指新仓（含 pnpm 编码形式 `..+..+dsh-022-pretest+…`）；
+  ③生产 config-ui `start.sh` 的 `JS_YAML_PATH`/`PIAI_ALL_PATH` 指旧仓（靠兜底仍能用，实测 /api/models 2266 模型 catalogLoaded=true）→ 已改指新仓；
+  ④DSF-work 工作区副本与测试（config-ui 项目 5 文件、scripts 2 文件）指旧仓 → 已改指新仓，门禁测试 27/27 通过；
+  ⑤profile 配置 YAML/JSON 合法性校验通过；新仓 pi-ai 版本与旧仓一致（1.3.0 同 patch_hash），路径替换安全。
+- 未动：历史文档与归档（升级方案/评估/rc2 清单等为历史事实记录）；`~/.dsh/memory/**` 内的历史日志；`~/bin/rollback.sh`（用户已指向封存目录，语义正确）。
+- 待用户执行：①`cd ~/.dsh/profiles/web && CI=true pnpm install --no-frozen-lockfile` 让 lsp/terminal 重新链接到新仓；②重启 config-ui 使 start.sh 新路径生效；③重启 dsh-web（若要让 profile 依赖变更进进程）。
+- 未解决（待用户拍板）：`~/.dsh/.credentials.yaml` 的 `AGNES_CN_PLAN_API_KEY` 仍是普通 CN key（sk-dgGCj…），应为 apk- 形态真 plan key；`cross-platform-agent-system/src/brain/router_v2.py:245` 降级路径 key 写死为 "test"（属白名单外项目，须走 P2 派单）。

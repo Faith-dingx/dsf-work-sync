@@ -25,7 +25,7 @@ set -euo pipefail
 
 # ------------------------------------------------------------------ 配置区
 WORKSPACE="${WORKSPACE:-/home/dingx/DSF-work}"
-HARNESS_DIR="${HARNESS_DIR:-/home/dingx/dsh-022-pretest}"
+HARNESS_DIR="${HARNESS_DIR:-/home/dingx/dsh}"
 DEPLOY_DIR="$WORKSPACE/.temp/dsh-deploy-v2"          # 本次构建工作区(全新, 仅此目录允许 rm -rf)
 OUTPUT_DIR="$WORKSPACE/.temp"
 VERSION="v0.1.4"                                      # 安装包版本 (v0.1.3 → v0.1.4: 修复 musl 三启动崩溃)

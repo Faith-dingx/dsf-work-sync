@@ -17,7 +17,7 @@ import path from 'node:path'
 
 const require = createRequire(import.meta.url)
 const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.js')
-const PIAI_ALL = '/home/dingx/dsh-022-pretest/node_modules/.pnpm/@earendil-works+pi-ai@1.3.0_patch_hash=4e1c90fd00aea42989664504668633033c1962e53c078609_43f55fd5cdebc7965cd56b71408d4583/node_modules/@earendil-works/pi-ai/dist/providers/all.js'
+const PIAI_ALL = '/home/dingx/dsh/node_modules/.pnpm/@earendil-works+pi-ai@1.3.0_patch_hash=4e1c90fd00aea42989664504668633033c1962e53c078609_43f55fd5cdebc7965cd56b71408d4583/node_modules/@earendil-works/pi-ai/dist/providers/all.js'
 
 let pass = 0
 let fail = 0
