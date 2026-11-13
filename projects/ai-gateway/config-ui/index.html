@@ -115,6 +115,7 @@
         <button type="button" class="tab" data-tab="subagents">子代理</button>
         <button type="button" class="tab" data-tab="keys">密钥</button>
         <button type="button" class="tab" data-tab="status">状态</button>
+        <button type="button" class="tab" data-tab="config">主Agent</button>
         <button type="button" class="tab" data-tab="rollback">回滚</button>
       </nav>
       <div class="topbar-right">
@@ -181,6 +182,16 @@
         <p class="hint">「原厂」= 系统自带预设（未打标记）；「自定义」= 通过本页添加的子代理（目录含 <code>.config-ui-created</code> 标记）。修改 model / reasoningEffort 只更新目标标注字段，文件其余内容与注释原样保留。</p>
         <div id="subagent-list" class="card-list"></div>
         <p class="hint" id="subagent-catalog-hint"></p>
+        <div class="card form-card" id="guard-clf-card">
+          <h3>分类器模型（guard-main-agent）</h3>
+          <p class="hint">主编排 agent 守卫的廉价分类模型（走 9888 路由）。修改写入 full 预设（含 compaction 摘要与双 classifierModel 实例），<b>新会话挂载时生效</b>，存量会话保持旧模型。</p>
+          <label class="field">
+            <span>分类器模型 ID</span>
+            <input type="text" id="guard-clf-model" placeholder="如 agnes_cn/agnes-3.0-flash" spellcheck="false">
+          </label>
+          <button type="button" class="primary" id="btn-guard-clf-save">保存分类器模型</button>
+          <span id="guard-clf-note" class="hint"></span>
+        </div>
       </section>
 
       <!-- ③ 密钥管理 -->
@@ -220,6 +231,67 @@
           <span class="hint" style="margin-left:8px">重启 dsh 主服务（3080，当前 dsh 会话短暂断开，config-ui 不受影响）</span>
         </div>
         <div id="status-card" class="card status-card"></div>
+      </section>
+
+      <!-- ⑥ 主 Agent 配置 -->
+      <section class="tab-pane hidden" id="pane-config">
+        <div class="pane-header">
+          <h2>主 Agent 配置</h2>
+          <div class="pane-actions">
+            <button type="button" class="ghost" id="btn-config-refresh">刷新</button>
+          </div>
+        </div>
+        <p class="hint">主 Agent 的模型与权限设置、可改写文件白名单。子代理配置请用「子代理」页。修改后重启 dsh 生效。</p>
+
+        <!-- 全局设置 -->
+        <div class="card config-section">
+          <h3>主 Agent 模型与权限（新会话默认值）</h3>
+          <div class="config-row">
+            <label class="field">
+              <span>厂商（provider）</span>
+              <select id="cfg-default-provider"></select>
+            </label>
+            <label class="field">
+              <span>模型（按厂商联动）</span>
+              <select id="cfg-default-model"></select>
+            </label>
+            <label class="field">
+              <span>思考强度（reasoningEffort）</span>
+              <select id="cfg-default-effort"></select>
+            </label>
+          </div>
+          <div class="config-row">
+            <label class="field">
+              <span>权限预设（源程序预设表）</span>
+              <select id="cfg-permission-preset">
+                <option value="">加载中…</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>默认 agent preset（新会话挂载的预设）</span>
+              <select id="cfg-default-preset">
+                <option value="">加载中…</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-actions" style="margin-top:12px">
+            <button type="button" class="primary" id="btn-save-settings">保存设置</button>
+            <span id="settings-save-status" class="sub-save-status"></span>
+          </div>
+        </div>
+
+        </div>
+
+        <!-- 白名单 -->
+        <div class="card config-section">
+          <h3>主agent白名单文件</h3>
+          <p class="hint">主agent可改写文件清单。编辑后保存即生效（文件每次写判定重读）。</p>
+          <textarea id="cfg-whitelist-content" class="whitelist-textarea" rows="12" spellcheck="false"></textarea>
+          <div class="form-actions" style="margin-top:12px">
+            <button type="button" class="primary" id="btn-save-whitelist">保存白名单</button>
+            <span id="whitelist-save-status" class="sub-save-status"></span>
+          </div>
+        </div>
       </section>
 
       <!-- ⑤ 回滚（可执行操作） -->

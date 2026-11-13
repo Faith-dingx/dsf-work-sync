@@ -38,31 +38,34 @@ PORT=8091 node server.js
 
 ## 界面功能区（T2）
 
-| 标签     | 功能                                                                                                                                                                                                                                             |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Provider | 列表 + 新增/编辑/删除（名称/显示名/endpoint/apiKeyEnv/API 风格/模型多行文本）；整体 PUT 替换 `llm-pi-ai.providers` 段，段外内容与注释保留                                                                                                        |
-| 子代理   | 扫描 PRESETS_DIR 各 `agent.cordis.yml`：展示 id/名称/生效模型（`agentOptions.model` > `agent-default-model`）；model 下拉可手输（datalist），reasoningEffort 下拉 off/low/high/max；保存时只改目标字段（行级替换，保留注释），保存后自动回读校验 |
-| 密钥     | 列表显示掩码（`sk-****abcd`），新增/覆盖 `{name, value}` 写入 dsh.env（600），保存后回显掩码，值输入框即清空                                                                                                                                     |
-| 状态     | 运行状态（探针 dshPort）/dshPort/DSH_TRUSTED_HOSTS/配置目录后缀/配置服务端口                                                                                                                                                                     |
-| 回滚     | 只读审计面：harness HEAD/备份计数/可用备份明细（cordis·凭据·记忆·git refs），对应 `rollback.sh`；**不执行回滚**，实际回滚走人工 CLI `bash ~/bin/rollback.sh`（每步二次确认）                                                                     |
+| 标签          | 功能                                                                                                                                                                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Provider      | 列表 + 新增/编辑/删除（名称/显示名/endpoint/apiKeyEnv/API 风格/模型多行文本）；整体 PUT 替换 `llm-pi-ai.providers` 段，段外内容与注释保留                                                                                                        |
+| 子代理        | 扫描 PRESETS_DIR 各 `agent.cordis.yml`：展示 id/名称/生效模型（`agentOptions.model` > `agent-default-model`）；model 下拉可手输（datalist），reasoningEffort 下拉 off/low/high/max；保存时只改目标字段（行级替换，保留注释），保存后自动回读校验 |
+| 子代理·分类器 | 「分类器（安检员）」区块：guard-main-agent / skill-router 的 classifierEndpoint + classifierModel 可视化管理（此前只能改 YAML）；只读展示当前值+来源行号，可编辑保存（备份+回读校验），模型输入带候选 datalist 可自由手输                        |
+| 密钥          | 列表显示掩码（`sk-****abcd`），新增/覆盖 `{name, value}` 写入 dsh.env（600），保存后回显掩码，值输入框即清空                                                                                                                                     |
+| 状态          | 运行状态（探针 dshPort）/dshPort/DSH_TRUSTED_HOSTS/配置目录后缀/配置服务端口                                                                                                                                                                     |
+| 回滚          | 只读审计面：harness HEAD/备份计数/可用备份明细（cordis·凭据·记忆·git refs），对应 `rollback.sh`；**不执行回滚**，实际回滚走人工 CLI `bash ~/bin/rollback.sh`（每步二次确认）                                                                     |
 
 安全约定：密钥**永不回显完整值**（API 掩码 + 页面不落明文 + 输入后即清空）；
 除 `/api/boot` 外所有 API 要求 `Authorization: Bearer <token>`。
 
 ## 接口
 
-| Method | Path                    | 说明                                                                                                                                                                                                                                               |
-| ------ | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/api/status`           | `{running(探测 dshPort), port, dshPort, DSH_TRUSTED_HOSTS, configDir, presetsDir}`                                                                                                                                                                 |
-| GET    | `/api/boot`             | 首启 token 明文（仅一次），之后 `{initialized:true}`                                                                                                                                                                                               |
-| GET    | `/api/providers`        | 读 settings.yaml `llm-pi-ai.providers`（保留段外一切）                                                                                                                                                                                             |
-| PUT    | `/api/providers`        | 整体替换 providers 段；备份 + 原子写                                                                                                                                                                                                               |
-| GET    | `/api/keys`             | dsh.env 全部 KEY，值一律掩码（`sk-****abcd`；非 sk- 前 4 位 `****`）                                                                                                                                                                               |
-| POST   | `/api/keys`             | `{name, value}` 写 dsh.env（追加/覆盖），chmod 600                                                                                                                                                                                                 |
-| GET    | `/api/subagents`        | 扫描各子代理标注字段（id/名称/model/provider/reasoningEffort 等，带行号）+ 生效模型                                                                                                                                                                |
-| PUT    | `/api/subagents/:id`    | 只改指定字段：`model`/`provider`/`effort`/`reasoningEffort`/`reasoning`/`agentOptions.provider`/`agentOptions.model`；字段不存在 422、未知字段 422、不存在 404；备份 + 原子写                                                                      |
-| GET    | `/api/rollback`         | 回滚状态（只读，对应 rollback.sh）：`{dshHome, harnessDir, harnessHead, backupCounts{cordis,credentials,memory}, recentCommits[], rollbackRefs[]}`；harness 仓库默认 `/home/dingx/deepseek-harness`（`ROLLBACK_HARNESS_DIR`/`HARNESS_DIR` 可覆盖） |
-| GET    | `/api/rollback/backups` | 可用备份明细（只读）：`{cordis[], credentials[], memory{backupDir,files[]}, commits[], rollbackRefs[]}`；备份源 = `$CONFIG_DIR` 下 `.agent-presets/full/*.bak-*`、`.credentials.yaml.bak-*`、`memory-backup/latest/`（生产即 `~/.dsh`）            |
+| Method | Path                         | 说明                                                                                                                                                                                                                                               |
+| ------ | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/api/status`                | `{running(探测 dshPort), port, dshPort, DSH_TRUSTED_HOSTS, configDir, presetsDir}`                                                                                                                                                                 |
+| GET    | `/api/boot`                  | 首启 token 明文（仅一次），之后 `{initialized:true}`                                                                                                                                                                                               |
+| GET    | `/api/providers`             | 读 settings.yaml `llm-pi-ai.providers`（保留段外一切）                                                                                                                                                                                             |
+| PUT    | `/api/providers`             | 整体替换 providers 段；备份 + 原子写                                                                                                                                                                                                               |
+| GET    | `/api/keys`                  | dsh.env 全部 KEY，值一律掩码（`sk-****abcd`；非 sk- 前 4 位 `****`）                                                                                                                                                                               |
+| POST   | `/api/keys`                  | `{name, value}` 写 dsh.env（追加/覆盖），chmod 600                                                                                                                                                                                                 |
+| GET    | `/api/subagents`             | 扫描各子代理标注字段（id/名称/model/provider/reasoningEffort 等，带行号）+ 生效模型                                                                                                                                                                |
+| PUT    | `/api/subagents/:id`         | 只改指定字段：`model`/`provider`/`effort`/`reasoningEffort`/`reasoning`/`agentOptions.provider`/`agentOptions.model`；字段不存在 422、未知字段 422、不存在 404；备份 + 原子写                                                                      |
+| GET    | `/api/classifiers`           | 分类器（安检员）当前值：guard-main-agent / skill-router 两插件块的 `classifierEndpoint`/`classifierModel`（解析 full preset，含来源行号）                                                                                                          |
+| PUT    | `/api/classifiers/:pluginId` | 安全写回分类器字段：surgical 行级替换（保留缩进/注释/其余字节）+ 写前备份 `.bak-config-ui-*` + 写后回读逐字节/YAML/取值校验（失败自动回滚）；endpoint 须 http(s):// 开头、model 非空，非法 400；未知插件 404、未知字段 422                         |
+| GET    | `/api/rollback`              | 回滚状态（只读，对应 rollback.sh）：`{dshHome, harnessDir, harnessHead, backupCounts{cordis,credentials,memory}, recentCommits[], rollbackRefs[]}`；harness 仓库默认 `/home/dingx/deepseek-harness`（`ROLLBACK_HARNESS_DIR`/`HARNESS_DIR` 可覆盖） |
+| GET    | `/api/rollback/backups`      | 可用备份明细（只读）：`{cordis[], credentials[], memory{backupDir,files[]}, commits[], rollbackRefs[]}`；备份源 = `$CONFIG_DIR` 下 `.agent-presets/full/*.bak-*`、`.credentials.yaml.bak-*`、`memory-backup/latest/`（生产即 `~/.dsh`）            |
 
 静态托管：`/`、`/index.html`、`/app.js`、`/style.css`（白名单，无法读取 server.js 等源码）。
 

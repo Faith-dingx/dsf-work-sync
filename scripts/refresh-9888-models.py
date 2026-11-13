@@ -46,7 +46,8 @@ def probe_full_list():
       - []         : 探测调用意外成功（网关接受了 __probe__），列表不可知
       - None       : 连接失败 / 超时 / 返回格式变化（未匹配「可用: [...]」）
     """
-    body = json.dumps({'model': '__probe__', 'messages': [{'role': 'user', 'content': 'hi'}], 'max_tokens': 8}).encode()
+    # 2026-09-11: 探测模型由假名 __probe__ 改为网关真实模型 agnes_cn/agnes-3.0-flash，消除整点 404 噪音
+    body = json.dumps({'model': 'agnes_cn/agnes-3.0-flash', 'messages': [{'role': 'user', 'content': 'hi'}], 'max_tokens': 8}).encode()
     req = urllib.request.Request(BASE + '/v1/chat/completions', data=body,
                                  headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + KEY})
     try:
@@ -70,11 +71,13 @@ def main():
     except Exception as e:
         print(f'WARN: /v1/models 获取失败（忽略）: {e}', file=sys.stderr)
 
-    # 2) 探测法权威全集：唯一可信来源，失败/不可知则保留旧表不覆盖
-    probe = probe_full_list()
-    if not probe:
-        print('ERROR: 探测法未能获取可用列表（网关不可达/格式变化/不可知），保留旧表不覆盖', file=sys.stderr)
+    # 2) 网关已于 2026-11-01 变更：未知模型返回 404 纯错误（不再携带「可用: [...]」），
+    #    探测法已无法取得权威全集，故不再做探测调用（避免每次整点产生一次无用推理请求），
+    #    权威列表一律以 /v1/models 为准。
+    if not v1:
+        print('ERROR: /v1/models 获取失败（网关不可达），保留旧表不覆盖', file=sys.stderr)
         return 1
+    probe = []
 
     # 3) 合并去重，只保留带厂商前缀的 id（裸 id 已废弃，chat/completions 400）
     models = sorted({m for m in (set(v1) | set(probe)) if '/' in m})

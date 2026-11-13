@@ -304,6 +304,7 @@
     else if (tab === 'subagents') loadSubagents();
     else if (tab === 'keys') loadKeys();
     else if (tab === 'status') loadStatus();
+    else if (tab === 'config') loadConfig();
     else if (tab === 'rollback') loadRollback();
   }
 
@@ -458,6 +459,30 @@
     }
   }
 
+  /* ───────────── 分类器模型（guard-main-agent，full 预设） ───────────── */
+  async function loadGuardClassifier() {
+    try {
+      const g = await api('/api/guard/classifier');
+      $('guard-clf-model').value = (g.models && g.models.full) || '';
+      $('guard-clf-note').textContent = g.note || '';
+    } catch (e) {
+      $('guard-clf-note').textContent = '加载失败：' + e.message;
+    }
+  }
+  async function saveGuardClassifier() {
+    try {
+      const r = await api('/api/guard/classifier', {
+        method: 'POST',
+        body: { model: $('guard-clf-model').value.trim() },
+      });
+      $('guard-clf-note').textContent = '✓ ' + (r.note || '已保存');
+      toast('分类器模型已保存', 'ok');
+    } catch (e) {
+      $('guard-clf-note').textContent = e.message;
+      toast('保存失败：' + e.message, 'err');
+    }
+  }
+
   /* ───────────── ② 子代理管理 ───────────── */
 
   async function loadSubagents() {
@@ -473,6 +498,7 @@
       });
       await loadModelCatalog(); // 下拉与来源说明统一用后端聚合目录
       renderSubagents(list);
+      loadGuardClassifier(); // 分类器模型（guard-main-agent）回填
     } catch (err) {
       listEl.innerHTML = `<div class="item-empty">${esc(err.message)}</div>`;
     }
@@ -1340,6 +1366,7 @@
 
     // 子代理
     $('btn-subagent-refresh').addEventListener('click', loadSubagents);
+    $('btn-guard-clf-save').addEventListener('click', saveGuardClassifier);
     $('subagent-list').addEventListener('click', (ev) => {
       const btn = ev.target.closest('button[data-act="save"]');
       if (!btn) return;
@@ -1456,6 +1483,12 @@
       });
     }
 
+    // 主Agent 页：厂商/模型/思考强度三下拉联动
+    const cfgProv = $('cfg-default-provider');
+    if (cfgProv) cfgProv.addEventListener('change', () => renderMainAgentModelSelect(true));
+    const cfgModel = $('cfg-default-model');
+    if (cfgModel) cfgModel.addEventListener('change', renderMainAgentEffortSelect);
+
     // 状态
     $('btn-status-refresh').addEventListener('click', loadStatus);
     // 重启 dsh 主服务（C 项）：confirm → POST /api/dsh/restart → toast
@@ -1491,4 +1524,253 @@
   }
 
   document.addEventListener('DOMContentLoaded', start);
+  /* ───────────── ⑥ 系统配置管理 ───────────── */
+
+  /** 主 Agent 页：厂商下拉（settings 目录优先；当前值不在目录则保留显示） */
+  function renderMainAgentSelects() {
+    const cfg = state.cfgAgentDefault || {};
+    const pSel = $('cfg-default-provider');
+    if (!pSel) return;
+    const prov = cfg.provider || (state.providerOptions[0] || {}).provider || '';
+    let html = state.providerOptions
+      .map(
+        (p) =>
+          '<option value="' +
+          esc(p.provider) +
+          '"' +
+          (p.provider === prov ? ' selected' : '') +
+          '>' +
+          esc(p.displayName || p.provider) +
+          '（' +
+          esc(p.provider) +
+          '）</option>',
+      )
+      .join('');
+    if (prov && !state.providerOptions.some((p) => p.provider === prov)) {
+      html =
+        '<option value="' +
+        esc(prov) +
+        '" selected>' +
+        esc(prov) +
+        '（不在目录，保留）</option>' +
+        html;
+    }
+    pSel.innerHTML = html;
+    renderMainAgentModelSelect();
+  }
+
+  /** 主 Agent 页：模型下拉（按当前厂商联动）。
+   *  fromUser=false（初始渲染）：settings 当前值不在该厂商列表时置顶保留显示（异常可见）。
+   *  fromUser=true（用户切换厂商）：完全按新厂商模型列表重建，选中第一个——旧厂商残留值不再占据首位。 */
+  function renderMainAgentModelSelect(fromUser) {
+    const pSel = $('cfg-default-provider');
+    const mSel = $('cfg-default-model');
+    if (!pSel || !mSel) return;
+    const prov = pSel.value;
+    const want = (state.cfgAgentDefault || {}).model || '';
+    const models = modelsForProvider(prov);
+    let list = models;
+    let chosen = models.includes(want) ? want : '';
+    if (!fromUser && want && !models.includes(want)) list = [want].concat(models);
+    if (fromUser && !chosen) chosen = models[0] || '';
+    mSel.innerHTML = list
+      .map(
+        (m) =>
+          '<option value="' +
+          esc(m) +
+          '"' +
+          (m === chosen ? ' selected' : '') +
+          '>' +
+          esc(m) +
+          '</option>',
+      )
+      .join('');
+    if (fromUser) (state.cfgAgentDefault || {}).model = chosen;
+    renderMainAgentEffortSelect();
+  }
+
+  /** 主 Agent 页：思考强度下拉（按模型声明级别；含「未设置」显式清除项；当前值不在列表则保留） */
+  function renderMainAgentEffortSelect() {
+    const pSel = $('cfg-default-provider');
+    const mSel = $('cfg-default-model');
+    const eSel = $('cfg-default-effort');
+    if (!pSel || !mSel || !eSel) return;
+    const cur = (state.cfgAgentDefault || {}).reasoningEffort || '';
+    const declared = effortLevelsFor(pSel.value, mSel.value);
+    // 用户要求保留 off（显式关闭推理）：声明级别原样呈现，全集含 off
+    const list = Array.isArray(declared) && declared.length ? declared : FULL_EFFORT_LEVELS;
+    const parts = [
+      '<option value=""' + (cur ? '' : ' selected') + '>（未设置 — 跟随模型默认）</option>',
+    ];
+    if (cur && !list.includes(cur)) {
+      parts.push(
+        '<option value="' +
+          esc(cur) +
+          '" selected>' +
+          esc(cur) +
+          '（当前值，不在声明列表）</option>',
+      );
+    }
+    parts.push(
+      ...list.map(
+        (l) => '<option value="' + l + '"' + (l === cur ? ' selected' : '') + '>' + l + '</option>',
+      ),
+    );
+    eSel.innerHTML = parts.join('');
+  }
+
+  async function loadConfig() {
+    // 加载模型目录（厂商/模型/思考级别下拉数据源）
+    try {
+      await loadModelCatalog();
+    } catch (err) {
+      toast('模型目录加载失败，下拉可能为空: ' + err.message, 'err');
+    }
+    // 加载全局设置并渲染三下拉
+    try {
+      const settings = await api('/api/settings');
+      const adm = settings.agentDefaultModel || {};
+      const perm = settings.permission || {};
+      const ap = settings.agentPresets || {};
+      state.cfgAgentDefault = {
+        provider: adm.provider || '',
+        model: adm.model || '',
+        reasoningEffort: adm.reasoningEffort || '',
+      };
+      renderMainAgentSelects();
+      // 权限预设下拉：选项=源程序权威表（server 端考证自 dsh-permission-presets 默认表）
+      const ppSelect = $('cfg-permission-preset');
+      if (ppSelect) {
+        const cur = perm.defaultPreset || 'danger-full-access';
+        const table = Array.isArray(settings.permissionPresets) ? settings.permissionPresets : [];
+        const known = table.some((p) => p.id === cur);
+        ppSelect.innerHTML =
+          (known
+            ? ''
+            : '<option value="' +
+              esc(cur) +
+              '" selected>' +
+              esc(cur) +
+              '（当前值，不在源程序预设表）</option>') +
+          table
+            .map(
+              (p) =>
+                '<option value="' +
+                esc(p.id) +
+                '"' +
+                (p.id === cur ? ' selected' : '') +
+                ' title="' +
+                esc(p.description || '') +
+                '">' +
+                esc(p.name || p.id) +
+                '</option>',
+            )
+            .join('');
+      }
+      // 默认 agent preset 下拉：选项=磁盘真实 preset 目录
+      const dpSelect = $('cfg-default-preset');
+      if (dpSelect) {
+        const cur = ap.default || 'full';
+        const ids = Array.isArray(settings.agentPresetIds) ? settings.agentPresetIds : [];
+        const known = ids.includes(cur);
+        dpSelect.innerHTML =
+          (known
+            ? ''
+            : '<option value="' +
+              esc(cur) +
+              '" selected>' +
+              esc(cur) +
+              '（当前值，不在预设目录）</option>') +
+          ids
+            .map(
+              (idv) =>
+                '<option value="' +
+                esc(idv) +
+                '"' +
+                (idv === cur ? ' selected' : '') +
+                '>' +
+                esc(idv) +
+                '</option>',
+            )
+            .join('');
+      }
+    } catch (err) {
+      toast('加载设置失败: ' + err.message, 'err');
+    }
+    // 加载白名单
+    try {
+      const wl = await api('/api/whitelist');
+      const ta = $('cfg-whitelist-content');
+      if (ta) {
+        ta.value = wl.raw || '';
+        if (!wl.exists) {
+          ta.placeholder = '文件不存在: ' + (wl.file || '');
+        }
+      }
+    } catch (err) {
+      const ta = $('cfg-whitelist-content');
+      if (ta) ta.value = '';
+      toast('加载白名单失败: ' + err.message, 'err');
+    }
+  }
+
+  async function saveSettings() {
+    const btn = $('btn-save-settings');
+    const status = $('settings-save-status');
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = '';
+    try {
+      const body = {
+        agentDefaultModel: {},
+        permission: {},
+        agentPresets: {},
+      };
+      const pSel = $('cfg-default-provider');
+      const mSel = $('cfg-default-model');
+      const eSel = $('cfg-default-effort');
+      if (pSel && pSel.value) body.agentDefaultModel.provider = pSel.value;
+      if (mSel && mSel.value) body.agentDefaultModel.model = mSel.value;
+      if (eSel) body.agentDefaultModel.reasoningEffort = eSel.value; // '' = 清除（服务端删行）
+      const ppSelect = $('cfg-permission-preset');
+      if (ppSelect && ppSelect.value) body.permission.defaultPreset = ppSelect.value;
+      const dpInput = $('cfg-default-preset');
+      if (dpInput && dpInput.value.trim()) body.agentPresets.default = dpInput.value.trim();
+      const r = await api('/api/settings', { method: 'PUT', body });
+      toast('设置已保存' + (r.backup ? '，已备份到 ' + esc(r.backup) : ''), 'ok');
+    } catch (err) {
+      toast('保存设置失败: ' + err.message, 'err');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function saveWhitelist() {
+    const btn = $('btn-save-whitelist');
+    const status = $('whitelist-save-status');
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = '';
+    try {
+      const ta = $('cfg-whitelist-content');
+      const content = ta ? ta.value : '';
+      if (!content.trim()) throw new Error('白名单内容不能为空');
+      const r = await api('/api/whitelist', { method: 'PUT', body: { content } });
+      toast('白名单已保存' + (r.backup ? '，已备份到 ' + esc(r.backup) : ''), 'ok');
+    } catch (err) {
+      toast('保存白名单失败: ' + err.message, 'err');
+    } finally {
+      if (btn) btn.disabled = false;
+      if (status) status.textContent = '';
+    }
+  }
+
+  // 系统配置事件绑定
+  if ($('btn-config-refresh')) {
+    $('btn-config-refresh').addEventListener('click', loadConfig);
+  }
+  if ($('btn-save-settings')) {
+    $('btn-save-settings').addEventListener('click', saveSettings);
+  }
+  if ($('btn-save-whitelist')) {
+    $('btn-save-whitelist').addEventListener('click', saveWhitelist);
+  }
 })();

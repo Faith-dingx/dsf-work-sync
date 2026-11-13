@@ -1,12 +1,97 @@
-# 主agent可改写文件清单 v2.3
+# 主agent可改写文件清单 v3.0
 # 读取方：@dsf/guard-main-agent 插件（plugin config 中指定清单路径）
 # 修订：2026-08-24 撤销宽泛 .sh 规则，主 agent 仅可读写文档文件；.sh 工具脚本归 code-agent 管理
+# 修订：2026-10-29 v3.0 用户授权：策略反转为默认放行（allow）+ 危险位置黑名单。
+#        保留：rm 机器硬禁、分类器门控、越界转派 code-agent（这三项不在此清单，仍在 guard 侧生效）
+# 修订：2026-10-29 code 席代执行（主 agent 直改被 guard 拦截：docs/ 仅放行 .md，清单文件不可自改防自我扩权）。
+#        原稿截断部分（黑名单条目）由 code 席按既有规则重建，待 P1 评审校准。
 
 # 判断策略
-defaultPolicy: deny # fail-close：不匹配白名单则拒绝
+defaultPolicy: allow # 2026-10-29：默认放行（原 deny）
 symlinkResolve: true # 判定前必须 resolve symlink，防绕过
 
-# 白名单（唯一权限来源）
+# ✅ 生效状态（2026-11-13 实测复核，取代 2026-10-29 的「代码不支持」结论）：
+#   现行 guard 实现（dsh-022-pretest packages/extensions/guard-main-agent/src/filePolicy.ts）
+#   已完整支持 v3.0：① blacklist 先判定、命中即无条件拒（优先于 whitelist）；
+#   ② 白名单未命中且无生效临时例外时，按 defaultPolicy 判定（allow=放行 / deny=fail-close）。
+#   证据：tests/file-policy.spec.ts「v3.0 策略：defaultPolicy allow + blacklist」用例随全包 160 项全绿；
+#   运行时实测——主 agent 写白名单外的 .js 文件未被拦截（defaultPolicy=allow 已生效）。
+#   沿革：老仓 commit 3173b3aa8f（放开主 agent：黑名单/defaultPolicy allow）已随 0.2.2 升级带入本仓。
+
+# 危险位置黑名单（defaultPolicy=allow 下，命中即拒；黑名单条目与 whitelist 同构 type/value；
+# 拟定语义：黑名单优先于白名单命中，含 allowedExtensions 时先过类型门——最终以 P1 评审定稿为准）
+blacklist:
+  # —— 自我扩权防线（职责边界 v1.4 保留项）——
+  - type: exact
+    value: '/home/dingx/DSF-work/docs/主agent可改写文件清单.yaml'
+    reason: '清单文件自身不可主 agent 自改（防自我扩权）；改单走 code-agent 或用户手动'
+
+  # —— 凭据与密钥（2026-09-10 授权文本明确「不含凭据」）——
+  - type: prefix
+    value: '/home/dingx/.dsh/.credentials.yaml'
+    reason: '凭据文件及其 .bak-* 备份，密钥不入主 agent 文件直写'
+  - type: prefix
+    value: '/home/dingx/.dsh/dsh.env'
+    reason: '密钥环境文件及其 .bak-* 备份'
+  - type: prefix
+    value: '/home/dingx/.ssh/'
+    reason: 'SSH 私钥/授权文件'
+
+  # —— 记忆库完整性（记忆更新走记忆工具，不走文件直写）——
+  - type: prefix
+    value: '/home/dingx/.dsh/memory/'
+    reason: '用户级/项目级长期记忆库，防误改与注入写入'
+
+  # —— 版本库内部结构（改坏 .git 不可逆）——
+  - type: prefix
+    value: '/home/dingx/DSF-work/.git/'
+    reason: '版本库内部对象，防不可逆损坏'
+  - type: prefix
+    value: '/home/dingx/dsh-022-pretest/.git/'
+    reason: '版本库内部对象，防不可逆损坏（2026-11-13：运行时仓由 deepseek-harness 迁至 dsh-022-pretest）'
+
+  # —— 工具脚本与系统层 ——
+  - type: prefix
+    value: '/home/dingx/bin/'
+    reason: '工具脚本目录（rollback.sh 等），归 code-agent 管理（v2.3 修订延续）'
+  - type: prefix
+    value: '/home/dingx/.config/systemd/'
+    reason: 'systemd 单元（dsh-web.service 等），服务变更归 code-agent，重启用户专属'
+  - type: prefix
+    value: '/etc/'
+    reason: '系统配置'
+  - type: prefix
+    value: '/boot/'
+    reason: '系统引导'
+  - type: prefix
+    value: '/usr/'
+    reason: '系统程序'
+  - type: prefix
+    value: '/bin/'
+    reason: '系统程序'
+  - type: prefix
+    value: '/sbin/'
+    reason: '系统程序'
+  - type: prefix
+    value: '/lib/'
+    reason: '系统库'
+  - type: prefix
+    value: '/lib64/'
+    reason: '系统库'
+  - type: prefix
+    value: '/proc/'
+    reason: '内核虚拟文件系统'
+  - type: prefix
+    value: '/sys/'
+    reason: '内核虚拟文件系统'
+  - type: prefix
+    value: '/dev/'
+    reason: '设备节点'
+  - type: prefix
+    value: '/var/'
+    reason: '系统状态/日志'
+
+# 白名单（现行 guard 实际生效的唯一放行机制；defaultPolicy=allow 代码支持落地后转为冗余保留）
 whitelist:
   # 工作区文档（仅 *.md）
   - type: prefix
@@ -34,13 +119,28 @@ whitelist:
     value: '/home/dingx/DSF-work/与agent的交互目录/'
     reason: '与agent交互文档（任意类型），2026-08-25 修正：原路径 /home/dingx/与agent的交互目录/ 不存在导致规则失效，真实路径位于工作区下'
 
+  # 2026-09-10 用户授权放开（边界规范 v1.4·范围②）
+  - type: prefix
+    value: '/home/dingx/.dsh/.agent-presets/'
+    allowedExtensions: ['.yml', '.yaml']
+    reason: '预设配置层（2026-09-10 用户授权；不含凭据）'
+  - type: exact
+    value: '/home/dingx/.dsh/settings.yaml'
+    reason: 'settings 配置（2026-09-10 用户授权）'
+  - type: prefix
+    value: '/home/dingx/dsh-022-pretest/packages/'
+    reason: '源码应急热修（2026-09-10 用户授权；2026-11-13 仓路径随 0.2.2 运行时仓更新；实质实施仍优先 P2，改后强制 P3）'
+  - type: prefix
+    value: '/home/dingx/DSF-work/projects/'
+    reason: '项目修改（2026-09-10 用户授权）'
+
+  # 2026-09-10 用户授权放开（普通区全权；系统与重要位置除外）
+  - type: prefix
+    value: '/mnt/DingYun/'
+    reason: 'DingYun 数据盘全权，含 ComfyUI（2026-09-10 用户授权）'
+
 # 动态白名单（用户授权时追加）
 dynamicWhitelist: []
-  # 示例：
-  # - type: prefix
-  #   value: "/home/dingx/other-project/docs/"
-  #   allowedExtensions: [".md"]
-  #   reason: "其他工作区文档"
 
 # 临时例外记录（用户明确要求编辑清单外文件时）
 temporaryOverrides: []

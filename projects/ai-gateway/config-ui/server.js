@@ -46,6 +46,8 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, spawnSync, execFile } = require('node:child_process');
+// rc.2 配置新家兼容层：settings.yaml → profiles/<profile>/cordis.patch.yml
+const settingsBridge = require('./settings-bridge.cjs');
 
 /* ───────────────────────── 环境与路径 ───────────────────────── */
 
@@ -95,6 +97,29 @@ try {
 const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.yaml');
 const ENV_FILE = path.join(CONFIG_DIR, 'dsh.env');
 const CREDENTIALS_FILE = path.join(CONFIG_DIR, '.credentials.yaml');
+
+/* ── rc.2 配置形态适配 ──────────────────────────────────────────────────────
+ * dsh 0.2.2 起，配置的存放位置从 `$DSH_HOME/settings.yaml` 变成 profile 的
+ * patch 层 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`（老文件启动时被
+ * 一次性改名成 settings.yaml.imported）。config-ui 仍按老路径读写 ⇒ 读不到
+ * 任何 provider、改配置也写不到 dsh 真正读的地方。
+ *
+ * 这里统一走 settingsBridge：读 → 老形状 section 映射；写 → 新形态下就地改
+ * cordis.patch.yml 的对应 entry.config 段（行级替换，保留 !!js 表达式与注释）。
+ * 老形态（settings.yaml 仍在）下行为与升级前完全一致。
+ */
+const PATCH_FORMAT = settingsBridge.ACTIVE_PROFILE;
+
+/** 读配置（老形状）。返回 { doc, format, file }。 */
+async function readSettings() {
+  return settingsBridge.readSettingsDoc(CONFIG_DIR, (text, label) => parseYaml(text, label));
+}
+
+/** 配置文件的实际路径（供前端展示「配置在哪」）。 */
+async function settingsFilePath() {
+  const { format, file } = await readSettings();
+  return format === 'patch' ? file : SETTINGS_FILE;
+}
 // 回滚审计面（对应 rollback.sh）：备份一律位于 $CONFIG_DIR（生产即 ~/.dsh：
 // .agent-presets/full/*.bak-*、.credentials.yaml.bak-*、memory-backup/latest/）；
 // harness 仓库默认 /home/dingx/deepseek-harness，可用 ROLLBACK_HARNESS_DIR / HARNESS_DIR 覆盖
@@ -127,6 +152,7 @@ try {
     process.env.JS_YAML_PATH,
     '/home/dingx/deepseek-harness/node_modules/js-yaml',
     '/srv/dsh/node/node_modules/js-yaml',
+    '/mnt/hermes/dsh/app/node_modules/js-yaml', // 本机（路由器）DSH 自带 js-yaml（2026-09-10 补：.9 之外的主机也能解析）
   ].filter(Boolean);
   for (const c of candidates) {
     try {
@@ -217,8 +243,13 @@ function needsQuote(v) {
   );
 }
 
-/** YAML 标量值渲染（含单引号转义）。 */
+/** YAML 标量值渲染（含单引号转义）。
+ * 类型保真：真布尔输出 true/false、真数字输出裸值（均不加引号）；
+ * 只有字符串才走 needsQuote 判定（避免把 "false" 这类字符串渲染成裸布尔、把布尔渲染成字符串）。
+ */
 function renderScalar(v) {
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (typeof v === 'number') return String(v);
   const s = String(v);
   if (needsQuote(s)) return `'${s.replace(/'/g, "''")}'`;
   return s;
@@ -292,29 +323,16 @@ function emitProviderBlock(providers, indent) {
 
 /** 读 providers（js-yaml 优先；失败时返回裸段文本+错误说明）。 */
 async function getProviders() {
-  const text = await fsp.readFile(SETTINGS_FILE, 'utf8');
-  const lines = text.split('\n');
-  const seg = locateProvidersSegment(lines);
-  if (!seg) return { providers: null, source: 'not-found' };
-  if (jsYaml) {
-    try {
-      const doc = jsYaml.load(text);
-      const providers = doc && doc['llm-pi-ai'] ? (doc['llm-pi-ai'].providers ?? null) : null;
-      return { providers, source: 'yaml' };
-    } catch (err) {
-      return {
-        providers: null,
-        source: 'yaml-error',
-        error: err.message,
-        raw: lines.slice(seg.start, seg.end).join('\n'),
-      };
-    }
+  let doc;
+  let file;
+  try {
+    ({ doc, file } = await readSettings());
+  } catch (err) {
+    return { providers: null, source: 'yaml-error', error: err.message, raw: null };
   }
-  return {
-    providers: null,
-    source: 'fallback-parse',
-    raw: lines.slice(seg.start, seg.end).join('\n'),
-  };
+  const providers = doc && doc['llm-pi-ai'] ? (doc['llm-pi-ai'].providers ?? null) : null;
+  if (!providers) return { providers: null, source: 'not-found' };
+  return { providers, source: 'yaml', file };
 }
 
 /** pi-ai 内置目录候选（ESM 包，Node ≥22.12 支持 require(ESM)；前两位失败则依次兜底，fail-open）。 */
@@ -824,6 +842,29 @@ async function putProviders(providers) {
   // 写前语义校验：原厂 resolveProfiles 硬拒绝项前置（已移除字段/baseURL/api/models 等），
   // 400 拒绝落盘，绝不让"写入→重启→静默全挂"再现（normalize 之后调用：数字已转 Number）
   validateProvidersSemantics(providers);
+  const { format, file: settingsFile } = await readSettings();
+  // legacy: `llm-pi-ai:`(0) → `providers:`(2) → provider 名(4)
+  // patch : `- id: llm-pi-ai`(0) → `config:`(2) → `providers:`(4) → provider 名(6)
+  const childIndent = format === 'patch' ? 6 : 4;
+  const blockLines = emitProviderBlock(providers, childIndent).split('\n');
+
+  if (format === 'patch') {
+    // rc.2 新形态：就地改 cordis.patch.yml 的 llm-pi-ai entry.config.providers 段
+    // （行级替换 → 文件里的 !!js 表达式与注释全部保留）
+    const bakSource = await backup(settingsFile);
+    try {
+      await settingsBridge.writePatchSection(CONFIG_DIR, 'llm-pi-ai', 'providers:', blockLines);
+    } catch (err) {
+      throw httpError(500, `写入 patch 层失败（未改动文件）: ${err.message}`);
+    }
+    return {
+      ok: true,
+      backup: bakSource,
+      bytes: Buffer.byteLength(blockLines.join('\n')),
+      file: settingsFile,
+    };
+  }
+
   let text;
   try {
     text = await fsp.readFile(SETTINGS_FILE, 'utf8');
@@ -832,17 +873,17 @@ async function putProviders(providers) {
   }
   const lines = text.split('\n');
   const seg = locateProvidersSegment(lines);
-  const blockLines = [`  providers:`, ...emitProviderBlock(providers, 4).split('\n')];
+  const blockLinesLegacy = [`  providers:`, ...blockLines];
   let next;
   if (seg) {
-    next = [...lines.slice(0, seg.start), ...blockLines, ...lines.slice(seg.end)];
+    next = [...lines.slice(0, seg.start), ...blockLinesLegacy, ...lines.slice(seg.end)];
   } else {
     const idx = lines.findIndex((l) => /^llm-pi-ai\s*:/.test(l));
     if (idx >= 0) {
-      next = [...lines.slice(0, idx + 1), ...blockLines, ...lines.slice(idx + 1)];
+      next = [...lines.slice(0, idx + 1), ...blockLinesLegacy, ...lines.slice(idx + 1)];
     } else {
       if (lines.length && lines[lines.length - 1] !== '') lines.push('');
-      next = [...lines, 'llm-pi-ai:', ...blockLines];
+      next = [...lines, 'llm-pi-ai:', ...blockLinesLegacy];
     }
   }
   // 去尾部多余空行，保留一个换行结束
@@ -979,15 +1020,9 @@ function hasCredentialsVersionHeader(lines) {
 
 /** 收集 settings.yaml llm-pi-ai.providers[*].apiKeyEnv 全部变量名（去重、保序）。 */
 async function listApiKeyEnvNames() {
-  let text = '';
-  try {
-    text = await fsp.readFile(SETTINGS_FILE, 'utf8');
-  } catch {
-    return [];
-  }
   const names = [];
   try {
-    const doc = parseYaml(text, SETTINGS_FILE);
+    const { doc } = await readSettings();
     const providers = doc && doc['llm-pi-ai'] && doc['llm-pi-ai'].providers;
     if (providers && typeof providers === 'object') {
       for (const p of Object.values(providers)) {
@@ -1792,7 +1827,7 @@ async function readPreset(id) {
   }
   let defaultModel = null;
   try {
-    const doc = parseYaml(await fsp.readFile(SETTINGS_FILE, 'utf8'), SETTINGS_FILE);
+    const { doc } = await readSettings();
     if (doc && doc['agent-default-model']) {
       defaultModel = {
         provider: doc['agent-default-model'].provider ?? null,
@@ -1884,7 +1919,7 @@ async function putSubagentFields(id, fields) {
   // settings 默认 provider（新增 agentOptions 块时回退用）
   let defaultProvider = null;
   try {
-    const doc = parseYaml(await fsp.readFile(SETTINGS_FILE, 'utf8'), SETTINGS_FILE);
+    const { doc } = await readSettings();
     if (doc && doc['agent-default-model'] && doc['agent-default-model'].provider) {
       defaultProvider = String(doc['agent-default-model'].provider);
     }
@@ -2624,9 +2659,57 @@ async function listSubagents() {
   return { presetsDir: PRESETS_DIR, count: subagents.length, subagents };
 }
 
+/* ───────────── 分类器模型（guard-main-agent / skill-router 的 classifierModel）───────────── */
+/* 落点：full-hub / full-bot 两个预设 yml 的 classifierModel 行（全部实例同值）；备份后整行替换，其余字节原样。 */
+const GUARD_PRESET_FILES = {
+  full: path.join(PRESETS_DIR, 'full', 'agent.cordis.yml'),
+};
+function readClassifierModels() {
+  const out = {};
+  for (const [preset, file] of Object.entries(GUARD_PRESET_FILES)) {
+    try {
+      const m = /classifierModel:\s*'([^']*)'/.exec(fs.readFileSync(file, 'utf8'));
+      out[preset] = m ? m[1] : null;
+    } catch {
+      out[preset] = null;
+    }
+  }
+  return out;
+}
+function writeClassifierModels(model) {
+  if (!/^[A-Za-z0-9._/-]{1,80}$/.test(model))
+    throw new Error('模型名含非法字符（仅允许字母数字._/）');
+  for (const file of Object.values(GUARD_PRESET_FILES)) {
+    const text = fs.readFileSync(file, 'utf8');
+    if (!/classifierModel:/.test(text)) continue;
+    fs.copyFileSync(file, `${file}.bak-clfmodel-ui-${nowStamp()}`);
+    fs.writeFileSync(file, text.replace(/(classifierModel:\s*')([^']*)(')/g, `$1${model}$3`));
+  }
+}
+async function getClassifier() {
+  return {
+    ok: true,
+    models: readClassifierModels(),
+    note: '生效条件：预设在新会话挂载时读取；存量会话保持旧模型直至重挂载/重启',
+  };
+}
+async function putClassifier(body) {
+  const model = String((body || {}).model || '').trim();
+  if (!model) throw httpError(400, 'model 必填');
+  writeClassifierModels(model);
+  return {
+    ok: true,
+    model,
+    models: readClassifierModels(),
+    note: '已写入 full 预设（备份 .bak-clfmodel-ui-*）；新会话挂载时生效',
+  };
+}
+
 async function dispatch(req, res, pathname, method, body) {
   if (pathname === '/api/subagents' && method === 'GET') return listSubagents();
   if (pathname === '/api/subagents' && method === 'POST') return createSubagent(body);
+  if (pathname === '/api/guard/classifier' && method === 'GET') return getClassifier();
+  if (pathname === '/api/guard/classifier' && method === 'POST') return putClassifier(body);
 
   const subPut = /^\/api\/subagents\/([A-Za-z0-9._-]+)$/.exec(pathname);
   if (subPut && method === 'PUT') {
@@ -2650,8 +2733,24 @@ async function main() {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const pathname = url.pathname;
 
+      // 健康探活：认证之前短路放行（无需 token，供外部监控探活；
+      // /health 不带 /api/ 前缀，若不在此拦截会被下方 serveStatic 404）
+      if (pathname === '/health' || pathname === '/api/health' || pathname === '/api/ping') {
+        sendJson(res, 200, {
+          ok: true,
+          service: 'config-ui',
+          uptime: Math.floor(process.uptime()),
+        });
+        return;
+      }
+
       // 认证：除 /api/boot 外全部要求 Bearer token
-      if (pathname.startsWith('/api/') && pathname !== '/api/boot') {
+      // DSH_CONFIG_UI_NO_AUTH=1 环境变量可跳过认证（仅局域网/本地使用）
+      if (
+        !(process.env.DSH_CONFIG_UI_NO_AUTH === '1') &&
+        pathname.startsWith('/api/') &&
+        pathname !== '/api/boot'
+      ) {
         const { token } = await ensureToken();
         const auth = req.headers.authorization || '';
         const m = /^Bearer\s+(.+)$/i.exec(auth);
@@ -2712,10 +2811,265 @@ module.exports = {
   parseEnv,
   locateProvidersSegment,
   emitProviderBlock,
+  renderScalar,
+  needsQuote,
   getBootError,
   // 思考级别纠正相关（供 tests/thought-corrections.test.mjs 直接调用，行为与 API 路径一致）
   THOUGHT_CORRECTIONS,
   correctThinkingLevelMap,
   getSupportedThinkingLevelsShim,
   builtinModelEffortLevels,
+};
+
+/* ─────────────── 系统配置：settings.yaml + 白名单 ─────────────── */
+
+const WHITELIST_FILE =
+  process.env.WHITELIST_FILE || '/mnt/hermes/DSF-work/docs/主agent可改写文件清单.yaml';
+
+/** GET /api/settings：读取 settings.yaml 的关键配置段（agent-default-model、permission、agent-presets）。 */
+/** 可用 agent preset id 列表（扫描 PRESETS_DIR 下含 agent.cordis.yml 的目录，与 /api/subagents 同源）。 */
+async function listAgentPresetIds() {
+  try {
+    const entries = await fsp.readdir(PRESETS_DIR, { withFileTypes: true });
+    const ids = [];
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      try {
+        await fsp.access(path.join(PRESETS_DIR, e.name, PRESET_FILE));
+        ids.push(e.name);
+      } catch {
+        /* 无 agent.cordis.yml → 非 preset */
+      }
+    }
+    return ids.sort();
+  } catch {
+    return [];
+  }
+}
+
+async function getSettings() {
+  let doc;
+  let file;
+  let text;
+  try {
+    ({ doc, file } = await readSettings());
+    text = await fsp.readFile(file, 'utf8');
+  } catch (err) {
+    return { error: `配置不可读: ${err.message}`, raw: null };
+  }
+  return {
+    agentDefaultModel: doc['agent-default-model'] || null,
+    permission: doc.permission || null,
+    agentPresets: doc['agent-presets'] || null,
+    rawYaml: text,
+    file,
+    // 配置形态：'legacy' = 老的 settings.yaml；'patch' = rc.2 的 profile patch 层
+    settingsFormat: (await readSettings()).format,
+    // 源程序权威预设表（考证自 @deepseek-ai/dsh-permission-presets lib/index.js L90-116 默认表；
+    //   部署未覆盖 presets。read-only 是合法 sandbox 模式但不是预设，不收录）
+    permissionPresets: [
+      {
+        id: 'workspace-write',
+        name: 'workspace-write（工作区写）',
+        description:
+          'Write inside the workspace and permitted temporary directories; wider retries require approval.',
+      },
+      {
+        id: 'danger-full-access',
+        name: 'danger-full-access（全权）',
+        description: 'Full file access without approval prompts.',
+      },
+    ],
+    // 可用 agent preset（源=磁盘真实目录：PRESETS_DIR 下含 agent.cordis.yml 的目录）
+    agentPresetIds: await listAgentPresetIds(),
+  };
+}
+
+/** PUT /api/settings：更新 settings.yaml 的关键配置（纯行级叶子键覆写，不重排任何段）。
+ *  body 支持：{ agentDefaultModel:{provider,model}, permission:{defaultPreset}, agentPresets:{default} }
+ *  设计（2026-08-31 写坏两次的教训）：绝不使用 jsYaml.dump 重排段——dump 会把顶层键
+ *  与子键混排造成游离键/双冒号损坏。只做"段内叶子键 value 行替换"，注释与其余结构原样保留。 */
+async function putSettings(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw httpError(
+      400,
+      'body 需为对象，如 {agentDefaultModel:{provider,model}, permission:{defaultPreset:...}}',
+    );
+  }
+  // 段名 → 允许覆写的叶子键集合（白名单外一律 422 拒绝，防意外破坏文件）
+  const SEGMENTS = {
+    'agent-default-model': ['provider', 'model', 'reasoningEffort'],
+    permission: ['defaultPreset'],
+    'agent-presets': ['default'],
+  };
+  const bodyMap = {
+    'agent-default-model': body.agentDefaultModel,
+    permission: body.permission,
+    'agent-presets': body.agentPresets,
+  };
+
+  let text;
+  try {
+    text = await fsp.readFile(SETTINGS_FILE, 'utf8');
+  } catch {
+    throw httpError(404, 'settings.yaml 不可读');
+  }
+  const lines = text.split('\n');
+  const changed = [];
+  // 段定位：顶层 key 行 + 段结束（下一个缩进 <= 段缩进的非空行）
+  function locateSegment(topKey) {
+    const re = new RegExp(`^${escapeRe(topKey)}\\s*:`);
+    let start = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (re.test(lines[i])) {
+        start = i;
+        break;
+      }
+    }
+    if (start < 0) return null;
+    const indent = /^(\s*)/.exec(lines[start])[1].length;
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i++) {
+      const l = lines[i];
+      if (!l.trim() || l.trimStart().startsWith('#')) continue;
+      if (/^(\s*)/.exec(l)[1].length <= indent) {
+        end = i;
+        break;
+      }
+    }
+    return { topKey, start, end };
+  }
+
+  // 段内叶子键覆写：命中行替换 value（保缩进保行尾注释）；value 为空串 = 删除该行（schema 语义：reasoningEffort 必须可清除，不能留空值）；未命中则在段末追加（2 空格缩进）
+  function setLeaf(seg, key, value) {
+    const keyRe = new RegExp(`^(\\s*)${escapeRe(key)}\\s*:(.*)$`);
+    if (value === '') {
+      // 空值 = 删除该行（reasoningEffort 必须可清除；不留空值行）
+      for (let i = seg.start + 1; i < seg.end; i++) {
+        if (keyRe.test(lines[i])) {
+          lines.splice(i, 1);
+          changed.push({ segment: seg.topKey, key, line: i + 1, removed: true });
+          return;
+        }
+      }
+      return; // 未命中且要清除 → 无操作
+    }
+    for (let i = seg.start + 1; i < seg.end; i++) {
+      const m = keyRe.exec(lines[i]);
+      if (m) {
+        const before = lines[i];
+        const ci = before.indexOf(' #');
+        const comment = ci >= 0 ? ' ' + before.slice(ci).trim() : '';
+        lines[i] = `${m[1]}${key}: ${value}${comment}`;
+        changed.push({ segment: seg.topKey, key, line: i + 1 });
+        return;
+      }
+    }
+    lines.splice(seg.end, 0, `  ${key}: ${value}`);
+    changed.push({ segment: seg.topKey, key, line: seg.end + 1, added: true });
+  }
+
+  for (const [segKey, updates] of Object.entries(bodyMap)) {
+    if (updates === undefined || updates === null) continue;
+    if (typeof updates !== 'object' || Array.isArray(updates)) {
+      throw httpError(400, `${segKey} 需为对象（如 {provider, model}）`);
+    }
+    const allowed = SEGMENTS[segKey];
+    const rejected = Object.keys(updates).filter((k) => !allowed.includes(k));
+    if (rejected.length) {
+      throw httpError(
+        422,
+        `段 ${segKey} 不支持的字段: ${rejected.join(', ')}（允许: ${allowed.join('/')}）`,
+      );
+    }
+    const seg = locateSegment(segKey);
+    if (!seg) throw httpError(404, `settings.yaml 中未找到段 ${segKey}`);
+    for (const [k, v] of Object.entries(updates)) {
+      if (typeof v !== 'string' && typeof v !== 'number') {
+        throw httpError(400, `${segKey}.${k} 的值必须是标量`);
+      }
+      setLeaf(seg, k, String(v));
+    }
+  }
+
+  if (!changed.length) {
+    throw httpError(
+      400,
+      '没有可更新的字段（body 需含 agentDefaultModel / permission / agentPresets 之一）',
+    );
+  }
+  const content = lines.join('\n');
+  // 写前全文 YAML 校验（可用时）；失败拒绝落盘，决不写坏文件
+  if (jsYaml) {
+    try {
+      jsYaml.load(content);
+    } catch (err) {
+      throw httpError(500, `生成的 YAML 无法解析，已拒绝保存（未改动文件）: ${err.message}`);
+    }
+  }
+  const bak = await backup(SETTINGS_FILE);
+  await atomicWrite(SETTINGS_FILE, content, 0o644);
+  try {
+    const after = await fsp.readFile(SETTINGS_FILE, 'utf8');
+    if (jsYaml) jsYaml.load(after); // 写后回读校验
+  } catch (err) {
+    if (bak) {
+      try {
+        await fsp.copyFile(bak, SETTINGS_FILE);
+      } catch {
+        /* 回滚尽力 */
+      }
+    }
+    throw httpError(500, `写入后校验失败，已回滚: ${err.message}`);
+  }
+  return { ok: true, changed, backup: bak };
+}
+/** GET /api/whitelist：读取主agent白名单文件。 */
+async function getWhitelist() {
+  try {
+    const text = await fsp.readFile(WHITELIST_FILE, 'utf8');
+    let doc;
+    try {
+      doc = jsYaml ? jsYaml.load(text) : null;
+    } catch {
+      doc = null;
+    }
+    return {
+      file: WHITELIST_FILE,
+      raw: text,
+      parsed: doc || null,
+      exists: true,
+    };
+  } catch (err) {
+    return { file: WHITELIST_FILE, raw: null, parsed: null, exists: false, error: err.message };
+  }
+}
+
+/** PUT /api/whitelist：更新白名单文件（原子写 + 备份）。 */
+async function putWhitelist(body) {
+  if (!body || typeof body.content !== 'string') {
+    throw httpError(400, 'body 需为 {content: "yaml文本"}');
+  }
+  const content = body.content;
+  // 写前校验
+  if (jsYaml) {
+    try {
+      jsYaml.load(content);
+    } catch (err) {
+      throw httpError(400, `YAML 校验失败: ${err.message}`);
+    }
+  }
+  const bak = await backup(WHITELIST_FILE);
+  await atomicWrite(WHITELIST_FILE, content);
+  return { ok: true, backup: bak, bytes: Buffer.byteLength(content) };
+}
+
+// 路由注册（在 routes 对象后追加）
+routes['/api/settings'] = {
+  GET: () => getSettings(),
+  PUT: (body) => putSettings(body || {}),
+};
+routes['/api/whitelist'] = {
+  GET: () => getWhitelist(),
+  PUT: (body) => putWhitelist(body || {}),
 };
