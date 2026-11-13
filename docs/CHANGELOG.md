@@ -1584,3 +1584,13 @@ pi-ai 目录中 DeepSeek/glm-5.2/hy3/kimi 等模型的 thinkingLevelMap 将 mini
 - **另查出一个更隐蔽的缺陷（第 4 个）**：0.2.2 rc.3 迁移把 0.1.x 时代 settings.yaml 里的两个自定义 provider 定义丢了——`HS_CodingPlan`（火山 Coding Plan，HUOSHAN_CODE_API_KEY + coding/v3）与 `agnes-cn`（AGNES_CN_API_KEY + cn/v1）在 ~/.dsh/settings.yaml.imported 里存在，但活配置 cordis.patch.yml 的 providers 段（11 个）里没有；而 full/full-hub preset 的子代理 agentOptions 仍引用这两个名字 → code-agent、code2-agent（HS_CodingPlan）、check-agent、plan-reviewer（agnes-cn）四个子代理的模型路由解析不到，project-planner 用 agnes 正常。**修法：在活 patch 补回两个兼容别名定义**（备份 cordis.patch.yml.bak-provideralias-20261113-215913），HS_CodingPlan 同 huoshan-code（models: deepseek-v4.1-flash / deepseek-v4-flash / glm-5.3-flash）、agnes-cn 同 agnes_cn（models: agnes-3.0-flash）；**不动 preset 的模型表（用户专属）**。providers 段 11 → 13 个，YAML 校验通过。
 - **其余体检结论**：cordis.patch.yml 内所有 model 引用（agnes_cn/agnes-3.0-flash ×2、MiniMax-M3.1-Flash）均可解析；skill-router 与 guard 分类器通道（9888 modelscope/Qwen/Qwen3.8-Flash-Next）实测 200；guard 的 rm 硬禁在 rc.3 源码仍在（policy.ts:126 isRmCommand + index.ts:183 调用）；dsh-web 今日报错全部集中在凌晨升级时段（00:30/05:56），21:33 重启后 0 错误；config-ui 今日 1881 条错误全是修复前旧账，17:00 后 0 条；内存 31G（用 5G）、磁盘 84G 可用。
 - **待用户执行**：重启 dsh-web 使两个别名 provider 生效，然后派发 check-agent（agnes-cn）与 code-agent（HS_CodingPlan）验证模型路由恢复。
+
+## 2026-11-13（22:30-22:50）删掉自造别名，厂商名统一按 2 号机
+
+- 用户明确要求：厂商配置既然以 2 号机为准，就不要在 9 号机另搞别名（维护麻烦），厂商名一律用 2 号机那套。
+- 变更（备份 .bak-alias-remove-20261113-224929）：
+  ①删掉 21:59 我自建的兼容别名 provider `HS_CodingPlan`（显示名「火山 Coding Plan（rc.3 兼容别名，同 huoshan-code）」）与 `agnes-cn`（「Agnes 中国（rc.3 兼容别名，同 agnes_cn）」）——它们污染了 3080 模型选项的厂商名；
+  ②preset（full、full-hub）里 8 处 provider 名改为 2 号机厂商名：`HS_CodingPlan`→`huoshan-code`、`agnes-cn`→`agnes_cn`（模型名保持裸名不变，走直连）；
+  ③`huoshan-code` 补 `deepseek-v4-flash`（full-hub 在用，直连实测 200）。
+- 结果：providers 段 13 → **11 个**，界面厂商名 = 火山 Coding Plan / 火山 Agent Plan / Agnes / Agnes_plan / MiniMax Plan(编程套餐) / Agnes 中国 plan / Agnes 中国 / DeepSeek / 软路由网关 /v1~v3。preset 在用的 5 个组合逐个直连实调**全部 200**。
+- 保留的三处 key 修正（HUOSHAN_API_KEY→ark-e9bf0e…、HUOSHAN_CODE_API_KEY→ark-f3aba030…、AGNES_CN_PLAN_API_KEY→apk-8IKI…）继续生效。
