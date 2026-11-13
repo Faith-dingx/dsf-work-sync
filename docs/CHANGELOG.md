@@ -1542,3 +1542,11 @@ pi-ai 目录中 DeepSeek/glm-5.2/hy3/kimi 等模型的 thinkingLevelMap 将 mini
 - 基线上云：推送前安全扫描（无 `.credentials.yaml` / `dsh.env` / token 文件 / `.ssh` / `*.pem` / `*.key`，无 `.dsh|.temp|.sessions|node_modules`，无 >50MB 文件）→ 推至 github.com/Faith-dingx/deepseek-harness 分支 `backup/dsh-022-baseline-20261113` = 466932e93a，远端 ls-remote 已确认。
 - 用户规则更新（2026-11-13）：所有服务重启一律由用户执行，主 agent 只做只读检查；用户终端 `systemctl --user` 报 DBUS 未定义时用 `XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart <单元>`，或 `loginctl enable-linger dingx`（用户已执行，Linger=yes 已生效）。
 - 教训：①跨机取数先确认谁是数据源宿主——2 号机是网关且常年在线，唯一库存 2 号机是既定设计，勿当隐患 ②删仓前必须查 worktree/submodule/gitlink 关系 ③改配置后逐层验证「代码→配置→运行时→日志」四层，前两层全绿不等于运行时生效。
+
+## 2026-11-13（傍晚）dsh 本机垃圾清理 + 文件清单生成
+
+- 清理（全部走 gio trash 可逆删除→统一清空，主 agent 不执行 rm）：DSF-work/.temp 旧安装包 v0.1.3(100M)/v0.1.4(107M)、dsh-deploy(32M)、sharp-musl-check(26M)、各清单 txt(15M)；.temp/archive 内 08-23 部署研究(188M)、v0.1.2 安装包(100M)、08 月清理目录(31M)；.temp 内 backup-20260825(196M)/dsh-home-backup-20260909(251M)/harness-backup-20260909 bundle(156M)（均已由远端备份替代）；~~/.dsh/subagent-gc-backup(22M)；~~/.dsh 下 200 个过时 .bak 备份（每类保留最近 2 个）；~~/.cache/{node,node-gyp,google-chrome}(303M)；~~/.dsh/sessions/query.sqlite-wal checkpoint 合并(210M)。合计约 1.7G。
+- 明确保留：~~/.cache/ms-playwright(907M，插件依赖)、~~/.cache/uv(393M，其它工具)、~~/.dsh/models/js-semantic(130M，语义检索模型)、pnpm store(3.7G，离线缓存)、~~/.dsh/sessions(会话历史)、全部 node_modules 与 .git。
+- 未清：systemd journal 归档 944M 在 /var/log/journal/ 需 root（sudo journalctl --vacuum-size=200M）。
+- 查证结论：0.2.2 体系下 ~/.dsh/settings.yaml 与 dsh.env 并不存在（属旧 0.1.x 布局）；config-ui 的 SETTINGS_FILE 已指向 profiles/web/cordis.patch.yml，故 02:11 那条 ENOENT 属旧代码历史日志，现无此依赖——此前列为"观察项"的该项关闭。
+- 新增 docs/dsh-本机文件清单-20261113.md：dsh 全部涉及文件的准确路径清单（运行时仓/systemd 单元/活配置/config-ui 两套/工具脚本/工作区与文档/记忆库/远端与 2 号机/备份回滚点），70 条关键路径已逐条验证存在、零缺失。
