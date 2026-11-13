@@ -1573,3 +1573,14 @@ pi-ai 目录中 DeepSeek/glm-5.2/hy3/kimi 等模型的 thinkingLevelMap 将 mini
 - 未动：历史文档与归档（升级方案/评估/rc2 清单等为历史事实记录）；`~/.dsh/memory/**` 内的历史日志；`~/bin/rollback.sh`（用户已指向封存目录，语义正确）。
 - 待用户执行：①`cd ~/.dsh/profiles/web && CI=true pnpm install --no-frozen-lockfile` 让 lsp/terminal 重新链接到新仓；②重启 config-ui 使 start.sh 新路径生效；③重启 dsh-web（若要让 profile 依赖变更进进程）。
 - 未解决（待用户拍板）：`~/.dsh/.credentials.yaml` 的 `AGNES_CN_PLAN_API_KEY` 仍是普通 CN key（sk-dgGCj…），应为 apk- 形态真 plan key；`cross-platform-agent-system/src/brain/router_v2.py:245` 降级路径 key 写死为 "test"（属白名单外项目，须走 P2 派单）。
+
+## 2026-11-13（21:35-22:00）模型配置全面体检 + 三厂商修复 + rc.3 丢失的 provider 定义补回
+
+- 用户反馈「模型配置中有三个厂商有问题」。落盘体检脚本 `.temp/archive/check-providers-20260713.py`（读 cordis.patch.yml 的 providers 段 + .credentials.yaml 的 refs，对每家用其 baseURL + 首个模型发 chat/completions，输出可用性矩阵），逐厂商实测 11 个 provider。
+- **实测抓出三个坏厂商（与用户反馈吻合）**：
+  ①`huoshan-code` 401 AuthenticationError；②`huoshan` 400 InvalidSubscription（账号 2129598171 无有效 AgentPlan 订阅）；③`Agnes_cn_plan` 403 用户额度不足 ￥0.000000。
+- **根因（凭据配错，不是网络问题）**：~/.dsh/.credentials.yaml 的 refs 把两把火山 key 装反了——`HUOSHAN_API_KEY` 装的是 ark-0b385f…（plan/coding 两端点皆废：plan 报无订阅、coding 报 401），`HUOSHAN_CODE_API_KEY` 装的是 ark-e9bf0e…（该 key 只通 plan 端点，放到 coding 端点必 401）。实测 4 把候选 key × 2 端点矩阵：ark-e9bf0e… 只通 plan/v3、ark-f3aba030… 只通 coding/v3、ark-0b385f… 两端点皆废。`~/.hermes/.env` 里的分配才是对的。`AGNES_CN_PLAN_API_KEY` 同样配错：refs 里存的是普通 CN key（sk-dgGCj…），hermes 里是 apk- 形态真 plan key（实测 agnes-2.5-pro / 2.5-pro-beta / 3.0-flash 全通）。
+- **修复**：~/.dsh/.credentials.yaml 三处值改正（备份 .credentials.yaml.bak-providerfix-20261113-215635）：HUOSHAN_API_KEY→ark-e9bf0e…、HUOSHAN_CODE_API_KEY→ark-f3aba030…、AGNES_CN_PLAN_API_KEY→apk-8IKI…。复测 11 个 provider 全部 200（router-v1 单次 502 SSL EOF 属偶发抖动，复测 5/5 全 200）。
+- **另查出一个更隐蔽的缺陷（第 4 个）**：0.2.2 rc.3 迁移把 0.1.x 时代 settings.yaml 里的两个自定义 provider 定义丢了——`HS_CodingPlan`（火山 Coding Plan，HUOSHAN_CODE_API_KEY + coding/v3）与 `agnes-cn`（AGNES_CN_API_KEY + cn/v1）在 ~/.dsh/settings.yaml.imported 里存在，但活配置 cordis.patch.yml 的 providers 段（11 个）里没有；而 full/full-hub preset 的子代理 agentOptions 仍引用这两个名字 → code-agent、code2-agent（HS_CodingPlan）、check-agent、plan-reviewer（agnes-cn）四个子代理的模型路由解析不到，project-planner 用 agnes 正常。**修法：在活 patch 补回两个兼容别名定义**（备份 cordis.patch.yml.bak-provideralias-20261113-215913），HS_CodingPlan 同 huoshan-code（models: deepseek-v4.1-flash / deepseek-v4-flash / glm-5.3-flash）、agnes-cn 同 agnes_cn（models: agnes-3.0-flash）；**不动 preset 的模型表（用户专属）**。providers 段 11 → 13 个，YAML 校验通过。
+- **其余体检结论**：cordis.patch.yml 内所有 model 引用（agnes_cn/agnes-3.0-flash ×2、MiniMax-M3.1-Flash）均可解析；skill-router 与 guard 分类器通道（9888 modelscope/Qwen/Qwen3.8-Flash-Next）实测 200；guard 的 rm 硬禁在 rc.3 源码仍在（policy.ts:126 isRmCommand + index.ts:183 调用）；dsh-web 今日报错全部集中在凌晨升级时段（00:30/05:56），21:33 重启后 0 错误；config-ui 今日 1881 条错误全是修复前旧账，17:00 后 0 条；内存 31G（用 5G）、磁盘 84G 可用。
+- **待用户执行**：重启 dsh-web 使两个别名 provider 生效，然后派发 check-agent（agnes-cn）与 code-agent（HS_CodingPlan）验证模型路由恢复。
