@@ -15,3 +15,15 @@ __pycache__/
 node_modules/
 .temp/dsh-deploy*/
 .temp/*.tar.gz
+# 临时产物区整体不入库（2026-11-13 收尾）：116 项未跟踪临时物长期污染 git status；
+# 例外放行 4 个有意保留的文件（已跟踪文件本不受 gitignore 影响，此处仅保证新文件不被误纳）
+.temp/*
+!.temp/README.md
+!.temp/restart-dsh.sh
+!.temp/subagent-guard-p1-plan.md
+!.temp/dsh-router-install-v0.1.3.MANIFEST.txt
+# 备份副本不入库（2026-11-13 收尾）：备份留在磁盘供回滚，版本库只收正文
+docs/*.bak-*
+projects/**/.bak-*/
+scripts/*.bak-*
+**/.tmp-*
