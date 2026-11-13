@@ -221,6 +221,36 @@ async function atomicWrite(file, content, mode) {
   await fsp.rename(tmp, file);
 }
 
+/* ── 进程内按文件路径互斥 ──
+ * [2026-11-14 新增] PUT /api/subagents/:id 与 POST /api/guard/classifier 都会写 .agent-presets/<preset>/agent.cordis.yml
+ * （生产 FULL_PRESETS_FILE = .agent-presets/full-hub/agent.cordis.yml，与分类器的 full-hub 落点同一文件）。
+ * 二者都是「读 → 改 → 写」：不加锁时后写者会把先写者的改动整片覆盖掉。
+ * 用法：await withFileLock(目标文件, async () => { 读 → 改 → 写 })——必须把「读」也放进锁内，只锁写没有意义。 */
+const FILE_LOCKS = new Map();
+function withFileLock(file, fn) {
+  const key = path.resolve(file);
+  const prev = FILE_LOCKS.get(key) || Promise.resolve();
+  let release;
+  const gate = new Promise((res) => {
+    release = res;
+  });
+  const chain = prev.then(() => gate);
+  FILE_LOCKS.set(key, chain);
+  return (async () => {
+    try {
+      await prev;
+    } catch {
+      /* 前一个持有者失败不阻塞后续 */
+    }
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (FILE_LOCKS.get(key) === chain) FILE_LOCKS.delete(key);
+    }
+  })();
+}
+
 /** 值是否需要 YAML 单引号包裹。 */
 function needsQuote(v) {
   // 前导零数字（如 007）：YAML 按 number 解析会丢前导零/改语义，保留引号
@@ -1589,8 +1619,12 @@ const MOUNT_TOOL_PREFIX = 'tool-subagent-';
 
 /** 定位挂载文件中所有 `- id: tool-subagent-<id>` 块，返回 [{start, end, blockIndent}]。
  *  end = 块后首个缩进 <= 块缩进 的非空非注释行下标（或行数）。 */
-function findMountBlocks(lines, id) {
-  const idRe = new RegExp(`^(\\s*)-\\s*id:\\s*${escapeRe(MOUNT_TOOL_PREFIX + id)}\\s*$`);
+/** 定位任意 `- id: <id>` 块，返回 [{start, end, blockIndent}]。
+ *  end = 块后首个缩进 <= 块缩进 的非空非注释行下标（或行数）。
+ *  [2026-11-14] 原 findMountBlocks 硬绑 `tool-subagent-` 前缀，分类器要定位 `guard-main-agent`/`skill-router`，
+ *  故抽出通用实现，findMountBlocks 改为其薄封装。 */
+function findIdBlocks(lines, id) {
+  const idRe = new RegExp(`^(\\s*)-\\s*id:\\s*${escapeRe(id)}\\s*$`);
   const blocks = [];
   for (let i = 0; i < lines.length; i++) {
     const m = idRe.exec(lines[i]);
@@ -1608,6 +1642,12 @@ function findMountBlocks(lines, id) {
     blocks.push({ start: i, end, blockIndent });
   }
   return blocks;
+}
+
+/** 定位挂载文件中所有 `- id: tool-subagent-<id>` 块，返回 [{start, end, blockIndent}]。
+ *  end = 块后首个缩进 <= 块缩进 的非空非注释行下标（或行数）。 */
+function findMountBlocks(lines, id) {
+  return findIdBlocks(lines, MOUNT_TOOL_PREFIX + id);
 }
 
 /** 在 [start,end) 内找缩进恰为 wantIndent 的 `key:` 行，返回行下标或 -1。 */
@@ -1927,44 +1967,47 @@ async function putSubagentFields(id, fields) {
     /* 读不到 →默认 provider 留 null */
   }
 
-  let fileText;
-  try {
-    fileText = await fsp.readFile(FULL_PRESETS_FILE, 'utf8');
-  } catch {
-    throw httpError(404, `full 挂载文件不可读：${FULL_PRESETS_FILE}`);
-  }
-  const lines = fileText.split('\n');
-  const { changed, blocks } = editMountAgentOptions(lines, id, values, defaultProvider);
-  if (!blocks) {
-    throw httpError(
-      404,
-      `该子代理在 full 挂载中无 tool-subagent 块（${FULL_PRESETS_FILE}），默认走 settings；如需独立模型请用『＋添加』创建自定义`,
-    );
-  }
-  if (!changed.length) {
-    throw httpError(422, `挂载块 tool-subagent-${id} 无可写字段（agentOptions 更新未命中）`);
-  }
-
-  const content = lines.join('\n');
-  // 写前校验：编辑结果必须仍是合法 YAML
-  validateYamlText(content, FULL_PRESETS_FILE);
-  const bak = await backup(FULL_PRESETS_FILE);
-  await atomicWrite(FULL_PRESETS_FILE, content);
-  try {
-    // 写后回读校验；失败则用备份回滚，决不留下坏文件
-    const after = await fsp.readFile(FULL_PRESETS_FILE, 'utf8');
-    validateYamlText(after, FULL_PRESETS_FILE);
-  } catch (err) {
-    if (bak) {
-      try {
-        await fsp.copyFile(bak, FULL_PRESETS_FILE);
-      } catch {
-        /* 回滚失败也继续报错 */
-      }
+  // [2026-11-14] 与分类器写入共用同一份 preset 文件 → 读改写整段放进文件互斥锁，避免互相覆盖
+  return await withFileLock(FULL_PRESETS_FILE, async () => {
+    let fileText;
+    try {
+      fileText = await fsp.readFile(FULL_PRESETS_FILE, 'utf8');
+    } catch {
+      throw httpError(404, `full 挂载文件不可读：${FULL_PRESETS_FILE}`);
     }
-    throw httpError(500, `写入后 YAML 校验失败，已回滚: ${err.message}`);
-  }
-  return { ok: true, id, target: 'mount', file: FULL_PRESETS_FILE, changed, backup: bak };
+    const lines = fileText.split('\n');
+    const { changed, blocks } = editMountAgentOptions(lines, id, values, defaultProvider);
+    if (!blocks) {
+      throw httpError(
+        404,
+        `该子代理在 full 挂载中无 tool-subagent 块（${FULL_PRESETS_FILE}），默认走 settings；如需独立模型请用『＋添加』创建自定义`,
+      );
+    }
+    if (!changed.length) {
+      throw httpError(422, `挂载块 tool-subagent-${id} 无可写字段（agentOptions 更新未命中）`);
+    }
+
+    const content = lines.join('\n');
+    // 写前校验：编辑结果必须仍是合法 YAML
+    validateYamlText(content, FULL_PRESETS_FILE);
+    const bak = await backup(FULL_PRESETS_FILE);
+    await atomicWrite(FULL_PRESETS_FILE, content);
+    try {
+      // 写后回读校验；失败则用备份回滚，决不留下坏文件
+      const after = await fsp.readFile(FULL_PRESETS_FILE, 'utf8');
+      validateYamlText(after, FULL_PRESETS_FILE);
+    } catch (err) {
+      if (bak) {
+        try {
+          await atomicWrite(FULL_PRESETS_FILE, await fsp.readFile(bak, 'utf8'));
+        } catch {
+          /* 回滚失败也继续报错 */
+        }
+      }
+      throw httpError(500, `写入后 YAML 校验失败，已回滚: ${err.message}`);
+    }
+    return { ok: true, id, target: 'mount', file: FULL_PRESETS_FILE, changed, backup: bak };
+  });
 }
 
 /** 自定义标记文件名：目录下存在即视为 config-ui 创建的自定义子代理（非原厂）。 */
@@ -2659,52 +2702,692 @@ async function listSubagents() {
   return { presetsDir: PRESETS_DIR, count: subagents.length, subagents };
 }
 
-/* ───────────── 分类器模型（guard-main-agent / skill-router 的 classifierModel）───────────── */
-/* 落点：full-hub / full-bot 两个预设 yml 的 classifierModel 行（全部实例同值）；备份后整行替换，其余字节原样。 */
-const GUARD_PRESET_FILES = {
-  full: path.join(PRESETS_DIR, 'full', 'agent.cordis.yml'),
-};
-function readClassifierModels() {
-  const out = {};
-  for (const [preset, file] of Object.entries(GUARD_PRESET_FILES)) {
-    try {
-      const m = /classifierModel:\s*'([^']*)'/.exec(fs.readFileSync(file, 'utf8'));
-      out[preset] = m ? m[1] : null;
-    } catch {
-      out[preset] = null;
+/* ───────────── 分类器模型（classifierModel）真实读写 ─────────────
+ * [2026-11-14 校准] 此前此处硬编码 410 Gone，理由是「DSH 0.2.0 已无 classifierModel / 无 guard-main-agent 包 /
+ * .agent-presets 无读取方」——该理由经查证为错：
+ *   · DSH 0.2.2-rc.3 仓 packages/extensions/guard-main-agent 与 skill-router 两包俱在，classifierModel 是合法 schema 键；
+ *   · 读取方存在：packages/preset/agent-presets/src/index.ts 启动时扫描 $DSH_HOME/.agent-presets 并 register 进
+ *     agentPresets registry；packages/bundle/web-app/cordis.patch.yml 以 id=agent-preset-discovery 插入它（includeUserRoot: true）。
+ * ⇒ 恢复为真实读写：surgical 改写 .agent-presets/<preset>/agent.cordis.yml 里 guard-main-agent / skill-router
+ *   两个块的 classifierModel 值（行尾注释与其余字节原样保留）。
+ */
+const CLASSIFIER_PRESET_IDS = ['full', 'full-hub'];
+const CLASSIFIER_PRESET_DEFAULT = 'full';
+const CLASSIFIER_GUARD_PLUGIN = 'guard-main-agent';
+const CLASSIFIER_ROUTER_PLUGIN = 'skill-router';
+const CLASSIFIER_MODEL_MAX_LEN = 100;
+const CLASSIFIER_MODEL_RE = /^[A-Za-z0-9._:/+-]+$/;
+const CLASSIFIER_MODEL_DIR_TTL_MS = 60000;
+
+/** 分类器模型 ID 校验：非空、长度 ≤100、禁空白/引号/#/控制字符，字符集 [A-Za-z0-9._:/+-]。 */
+function validateClassifierModel(raw) {
+  if (typeof raw !== 'string') {
+    const t = raw === null ? 'null' : Array.isArray(raw) ? 'array' : typeof raw;
+    return { ok: false, reason: `model 必须是字符串（当前是 ${t}）` };
+  }
+  const v = raw.trim();
+  if (!v) return { ok: false, reason: 'model 不能为空' };
+  if (v.length > CLASSIFIER_MODEL_MAX_LEN) {
+    return {
+      ok: false,
+      reason: `model 长度 ${v.length} 超过上限 ${CLASSIFIER_MODEL_MAX_LEN} 字符`,
+    };
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(v)) return { ok: false, reason: 'model 不允许包含控制字符' };
+  if (/\s/.test(v)) return { ok: false, reason: 'model 不允许包含空白字符' };
+  if (/['"]/.test(v)) return { ok: false, reason: 'model 不允许包含单引号 \' 或双引号 "' };
+  if (v.includes('#')) return { ok: false, reason: "model 不允许包含 '#'" };
+  if (!CLASSIFIER_MODEL_RE.test(v)) {
+    const bad = [...new Set(v.split('').filter((c) => !/[A-Za-z0-9._:/+-]/.test(c)))];
+    return {
+      ok: false,
+      reason: `model 含非法字符 ${bad.map((c) => JSON.stringify(c)).join(' ')}（只允许 A-Za-z0-9 与 . _ : / + -）`,
+    };
+  }
+  return { ok: true, value: v };
+}
+
+/** 预设落点文件：.agent-presets/<preset>/agent.cordis.yml（PRESET_FILE='agent.cordis.yml'）。 */
+function classifierPresetFile(presetId) {
+  return path.join(PRESETS_DIR, presetId, PRESET_FILE);
+}
+
+/** 拆出 `key:` 之后的 YAML 标量：{valueStart, valueEnd, quote, literal, trailing}
+ *  literal = 去引号后的字面量（单引号 '' 已还原）；trailing = 字面量之后的原始行尾内容（通常是注释）。 */
+function splitYamlScalar(rest) {
+  let i = 0;
+  while (i < rest.length && (rest[i] === ' ' || rest[i] === '\t')) i++;
+  const q = rest[i];
+  if (q === "'" || q === '"') {
+    let j = i + 1;
+    let closed = false;
+    while (j < rest.length) {
+      if (q === "'" && rest[j] === "'") {
+        if (rest[j + 1] === "'") {
+          j += 2;
+          continue;
+        } // '' 是转义的单引号
+        closed = true;
+        break;
+      }
+      if (q === '"' && rest[j] === '"' && rest[j - 1] !== '\\') {
+        closed = true;
+        break;
+      }
+      j++;
+    }
+    const end = closed ? j + 1 : rest.length;
+    let literal = closed ? rest.slice(i + 1, j) : rest.slice(i + 1);
+    if (q === "'") literal = literal.replace(/''/g, "'");
+    return { valueStart: i, valueEnd: end, quote: q, literal, trailing: rest.slice(end) };
+  }
+  let end = rest.length;
+  for (let k = i; k < rest.length; k++) {
+    if (rest[k] === '#' && (k === 0 || rest[k - 1] === ' ' || rest[k - 1] === '\t')) {
+      end = k;
+      break;
     }
   }
-  return out;
-}
-function writeClassifierModels(model) {
-  if (!/^[A-Za-z0-9._/-]{1,80}$/.test(model))
-    throw new Error('模型名含非法字符（仅允许字母数字._/）');
-  for (const file of Object.values(GUARD_PRESET_FILES)) {
-    const text = fs.readFileSync(file, 'utf8');
-    if (!/classifierModel:/.test(text)) continue;
-    fs.copyFileSync(file, `${file}.bak-clfmodel-ui-${nowStamp()}`);
-    fs.writeFileSync(file, text.replace(/(classifierModel:\s*')([^']*)(')/g, `$1${model}$3`));
-  }
-}
-async function getClassifier() {
   return {
-    ok: true,
-    models: readClassifierModels(),
-    note: '生效条件：预设在新会话挂载时读取；存量会话保持旧模型直至重挂载/重启',
-  };
-}
-async function putClassifier(body) {
-  const model = String((body || {}).model || '').trim();
-  if (!model) throw httpError(400, 'model 必填');
-  writeClassifierModels(model);
-  return {
-    ok: true,
-    model,
-    models: readClassifierModels(),
-    note: '已写入 full 预设（备份 .bak-clfmodel-ui-*）；新会话挂载时生效',
+    valueStart: i,
+    valueEnd: end,
+    quote: '',
+    literal: rest.slice(i, end).trim(),
+    trailing: rest.slice(end),
   };
 }
 
+/** 读 `key: value` 行的字面量值（去引号）；不是该形态 → null。 */
+function readKeyScalar(line) {
+  const m = /^\s*[A-Za-z0-9_.-]+\s*:\s*(.*)$/.exec(line);
+  if (!m) return null;
+  return splitYamlScalar(m[1]).literal;
+}
+
+/** 分类器模型值是否必须加引号才能保证 YAML 读回来仍是字符串（数字/布尔/null 会被当成非字符串）。 */
+function classifierValueNeedsQuotes(v) {
+  if (needsQuote(v)) return true;
+  if (/^\d+(\.\d+)?$/.test(v)) return true; // 纯数字：needsQuote 会放行（它是数字字段的渲染规则），但模型 id 必须是字符串
+  return false;
+}
+
+/** 渲染 `key: value` 一行（引号风格给定或按需判定）。 */
+function renderClassifierKeyLine(indent, key, value, quoteStyle) {
+  let q = quoteStyle;
+  if (!q && classifierValueNeedsQuotes(value)) q = "'";
+  let rendered;
+  if (q === "'") rendered = `'${value.replace(/'/g, "''")}'`;
+  else if (q === '"') rendered = `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  else rendered = value;
+  return `${' '.repeat(indent)}${key}: ${rendered}`;
+}
+
+/** 替换 `key: value` 行里的字面量：只改字面量本身，行尾注释与该行其余字节原样保留。 */
+function replaceKeyScalar(line, newValue) {
+  const m = /^(\s*)([A-Za-z0-9_.-]+)(\s*:\s*)(.*)$/.exec(line);
+  if (!m) return line;
+  const [, indent, key, sep, rest] = m;
+  const sp = splitYamlScalar(rest);
+  const quote = sp.quote || (classifierValueNeedsQuotes(newValue) ? "'" : '');
+  let rendered;
+  if (quote === "'") rendered = `'${newValue.replace(/'/g, "''")}'`;
+  else if (quote === '"') rendered = `"${newValue.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  else rendered = newValue;
+  return `${indent}${key}${sep}${rendered}${sp.trailing}`;
+}
+
+/** 某行的值是否带引号（' | " | '' 表示裸标量）。 */
+function detectQuoteStyle(line) {
+  const m = /^\s*[A-Za-z0-9_.-]+\s*:\s*(.*)$/.exec(line);
+  if (!m) return '';
+  const t = m[1].trimStart();
+  if (t.startsWith("'")) return "'";
+  if (t.startsWith('"')) return '"';
+  return '';
+}
+
+/** config 配置层的直接子键缩进档（= 严格大于 config 自身缩进的最小缩进）；无子键 → -1。 */
+function configChildLevel(lines, configLine, cfgEnd, configIndent) {
+  let min = Infinity;
+  for (let i = configLine + 1; i < cfgEnd; i++) {
+    const t = lines[i];
+    if (t.trim() === '' || t.trimStart().startsWith('#')) continue;
+    const ind = /^(\s*)/.exec(t)[1].length;
+    if (ind > configIndent && ind < min) min = ind;
+  }
+  return min === Infinity ? -1 : min;
+}
+
+/** 定位插件块内的 classifierModel / classifierEndpoint（必须恰在 config 子键层，更深层同名键不算命中）。
+ *  state: ok | missing（无此块） | ambiguous（多个块） | no-config（块内无 config 层或 config 层无子键） */
+function locateClassifierModel(lines, pluginId) {
+  const blocks = findIdBlocks(lines, pluginId);
+  if (!blocks.length) return { state: 'missing', blocks: [] };
+  if (blocks.length > 1) return { state: 'ambiguous', blocks };
+  const b = blocks[0];
+  const configIndent = b.blockIndent + 2;
+  const configLine = findKeyAtIndent(lines, b.start + 1, b.end, 'config', configIndent);
+  if (configLine < 0) return { state: 'no-config', block: b };
+  const cfgSub = findSubtreeStart(lines, configLine + 1, b.end, configIndent);
+  if (!cfgSub) return { state: 'no-config', block: b };
+  const cfgEnd = subtreeEnd(lines, configLine + 1, b.end, configIndent);
+  const childLevel = configChildLevel(lines, configLine, cfgEnd, configIndent);
+  if (childLevel < 0)
+    return { state: 'no-config', block: b, configLine, configIndent, cfgSub, cfgEnd };
+  return {
+    state: 'ok',
+    block: b,
+    configLine,
+    configIndent,
+    cfgSub,
+    cfgEnd,
+    childIndent: childLevel,
+    modelLine: findKeyAtIndent(lines, cfgSub.line, cfgEnd, 'classifierModel', childLevel),
+    endpointLine: findKeyAtIndent(lines, cfgSub.line, cfgEnd, 'classifierEndpoint', childLevel),
+  };
+}
+
+/** 在 config 子键层末尾新增 `key: value` 的插入计划（纯计算，不改 lines）。
+ *  缩进沿用相邻子键、引号风格沿用相邻子键；config 层无可沿用的相邻子键 → null。 */
+function planClassifierKeyInsert(lines, loc, key, value) {
+  const neighbour = (() => {
+    let last = -1;
+    for (let i = loc.cfgSub.line; i < loc.cfgEnd; i++) {
+      const t = lines[i];
+      if (t.trim() === '' || t.trimStart().startsWith('#')) continue;
+      last = i;
+    }
+    return last;
+  })();
+  if (neighbour < 0) return null;
+  const indent = /^(\s*)/.exec(lines[neighbour])[1].length;
+  const quote = detectQuoteStyle(lines[neighbour]);
+  const pos = subtreeInsertPos(lines, loc.cfgSub.line, loc.cfgEnd, loc.configIndent);
+  return { pos, text: renderClassifierKeyLine(indent, key, value, quote), indent, quote };
+}
+
+/* ── loader 同款 YAML 方言（entryListSchema = JSON_SCHEMA + !!js）── */
+let yamlEntryListSchema = null;
+function getEntryListSchema() {
+  if (!jsYaml) return null;
+  if (yamlEntryListSchema !== null) return yamlEntryListSchema || null;
+  try {
+    const JsExpr = new jsYaml.Type('tag:yaml.org,2002:js', {
+      kind: 'scalar',
+      resolve: (d) => typeof d === 'string',
+      construct: (d) => ({ __jsExpr: d }),
+      predicate: (d) => Boolean(d) && typeof d === 'object' && '__jsExpr' in d,
+      represent: (d) => d['__jsExpr'],
+    });
+    yamlEntryListSchema = jsYaml.JSON_SCHEMA.extend(JsExpr);
+  } catch {
+    yamlEntryListSchema = false;
+  }
+  return yamlEntryListSchema || null;
+}
+
+/** 用 DSH loader 同款方言解析整份文件；拿不到同款 schema 时退而用 validateYamlText（宽松 schema，容忍 !!js）。 */
+function parseWithLoaderDialect(text, label) {
+  const schema = getEntryListSchema();
+  if (!schema) {
+    validateYamlText(text, label);
+    return { dialect: 'fallback' };
+  }
+  try {
+    jsYaml.load(text, { schema });
+  } catch (err) {
+    throw new Error(`${label}: loader 同款 YAML 方言解析失败: ${err.message}`);
+  }
+  return { dialect: 'entryListSchema' };
+}
+
+/* ── 9888 在册模型目录（仅提示不阻断；TTL 缓存，避免每次写都拉全量）── */
+let classifierModelDirCache = null;
+async function fetchClassifierModelDir() {
+  const now = Date.now();
+  if (classifierModelDirCache && now - classifierModelDirCache.at < CLASSIFIER_MODEL_DIR_TTL_MS) {
+    return classifierModelDirCache;
+  }
+  const base = (process.env.MODEL_ROUTER_URL || 'http://127.0.0.1:9888').replace(/\/+$/, '');
+  let entry;
+  try {
+    const r = await fetch(`${base}/v1/models`, { signal: AbortSignal.timeout(2500) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    const rows = Array.isArray(j && j.data) ? j.data : Array.isArray(j) ? j : [];
+    const ids = [];
+    const chatIds = [];
+    for (const m of rows) {
+      if (!m || typeof m.id !== 'string' || !m.id) continue;
+      ids.push(m.id);
+      if (m.chat_capable === false) continue;
+      chatIds.push(m.id);
+    }
+    entry = { at: now, ids, chatIds, error: null };
+  } catch (err) {
+    entry = { at: now, ids: null, chatIds: null, error: (err && err.message) || String(err) };
+  }
+  classifierModelDirCache = entry;
+  return entry;
+}
+
+/** 不在册时给出若干在册候选（优先同厂商前缀）。 */
+function pickClassifierCandidates(dir, model) {
+  const chat = dir && dir.chatIds && dir.chatIds.length ? dir.chatIds : (dir && dir.ids) || [];
+  const vendor = model.includes('/') ? model.split('/')[0] : '';
+  const same = vendor ? chat.filter((id) => id.startsWith(`${vendor}/`)) : [];
+  const out = [];
+  for (const id of [...same, ...chat]) {
+    if (out.includes(id)) continue;
+    out.push(id);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+function buildClassifierRouterNote(dir, model) {
+  if (!dir || dir.error || !dir.ids) {
+    return `未能校验 9888 目录（${(dir && dir.error) || '网关不可达'}）：本次写入未受阻，仅无法确认该模型是否在册`;
+  }
+  if (dir.ids.includes(model)) return `模型 ${model} 已在 9888 当前目录中`;
+  const cand = pickClassifierCandidates(dir, model);
+  const tail = cand.length ? `可选候选：${cand.join('、')}` : '9888 当前目录里没有可列出的候选';
+  return `注意：该模型不在 9888 当前目录中（目录共 ${dir.ids.length} 项）；${tail}`;
+}
+
+/** 当前会话实际使用的 preset id（只读探测；取不到给 null，绝不因此报错）。
+ *  只用 findIdBlocks/findKeyAtIndent/readKeyScalar（两份 server.js 副本都有的助手），
+ *  避免依赖只存在于某一副本里的 patchEntryLeaf。 */
+async function detectActivePreset() {
+  const env = process.env.CLASSIFIER_ACTIVE_PRESET;
+  if (env && CLASSIFIER_PRESET_IDS.includes(env)) return env;
+  try {
+    const text = await fsp.readFile(LIVE_CONFIG_FILE, 'utf8');
+    const lines = text.split('\n');
+    for (const pid of CLASSIFIER_PRESET_IDS) {
+      for (const b of findIdBlocks(lines, `preset-${pid}`)) {
+        const nameLine = findKeyAtIndent(lines, b.start + 1, b.end, 'name', b.blockIndent + 2);
+        if (nameLine < 0) continue;
+        if (readKeyScalar(lines[nameLine]) !== '@deepseek-ai/dsh-agent-preset') continue;
+        const configLine = findKeyAtIndent(lines, b.start + 1, b.end, 'config', b.blockIndent + 2);
+        if (configLine < 0) continue;
+        const idLine = findKeyAtIndent(lines, configLine + 1, b.end, 'id', b.blockIndent + 4);
+        if (idLine < 0) continue;
+        if (readKeyScalar(lines[idLine]) === pid) return pid;
+      }
+    }
+  } catch {
+    /* 活 patch 读不到 → null */
+  }
+  return null;
+}
+
+/** 读一个预设文件里 guard/skill-router 的 classifierModel 与 endpoint。文件缺失/不可读 → hasBlock=false，不抛错。 */
+async function readClassifierPreset(presetId) {
+  const file = path.resolve(classifierPresetFile(presetId));
+  const item = {
+    id: presetId,
+    file,
+    hasBlock: false,
+    models: { [CLASSIFIER_GUARD_PLUGIN]: null, [CLASSIFIER_ROUTER_PLUGIN]: null },
+    endpoint: null,
+  };
+  let text;
+  try {
+    text = await fsp.readFile(file, 'utf8');
+  } catch {
+    return item;
+  }
+  const lines = text.split('\n');
+  const g = locateClassifierModel(lines, CLASSIFIER_GUARD_PLUGIN);
+  const r = locateClassifierModel(lines, CLASSIFIER_ROUTER_PLUGIN);
+  if (g.state === 'ok' || g.state === 'no-config') {
+    item.hasBlock = true;
+    if (g.state === 'ok' && g.modelLine >= 0) {
+      item.models[CLASSIFIER_GUARD_PLUGIN] = {
+        value: readKeyScalar(lines[g.modelLine]),
+        line: g.modelLine + 1,
+      };
+    }
+    if (g.state === 'ok' && g.endpointLine >= 0) {
+      item.endpoint = { value: readKeyScalar(lines[g.endpointLine]), line: g.endpointLine + 1 };
+    }
+  }
+  if (r.state === 'ok' && r.modelLine >= 0) {
+    item.models[CLASSIFIER_ROUTER_PLUGIN] = {
+      value: readKeyScalar(lines[r.modelLine]),
+      line: r.modelLine + 1,
+    };
+  }
+  if (!item.endpoint && r.state === 'ok' && r.endpointLine >= 0) {
+    item.endpoint = { value: readKeyScalar(lines[r.endpointLine]), line: r.endpointLine + 1 };
+  }
+  return item;
+}
+
+/** 兼容字段 models：{ full: '<full 预设 guard-main-agent 的 classifierModel 值>', ... }（缺块给 null）。 */
+async function readClassifierModelsMap() {
+  const out = {};
+  for (const id of CLASSIFIER_PRESET_IDS) {
+    const item = await readClassifierPreset(id);
+    const v = item.models[CLASSIFIER_GUARD_PLUGIN];
+    out[id] = v && typeof v.value === 'string' ? v.value : null;
+  }
+  return out;
+}
+
+/** GET /api/guard/classifier：读出各预设里 guard-main-agent / skill-router 的 classifierModel 与 endpoint。 */
+async function getClassifier() {
+  const presets = [];
+  for (const id of CLASSIFIER_PRESET_IDS) presets.push(await readClassifierPreset(id));
+  const models = {};
+  for (const p of presets) {
+    const v = p.models[CLASSIFIER_GUARD_PLUGIN];
+    models[p.id] = v && typeof v.value === 'string' ? v.value : null;
+  }
+  const activePreset = await detectActivePreset();
+  let activeHasGuard = null;
+  if (activePreset) {
+    const item = presets.find((p) => p.id === activePreset);
+    activeHasGuard = item ? item.hasBlock : false;
+  }
+  const target = presets.find((p) => p.id === CLASSIFIER_PRESET_DEFAULT) || presets[0];
+  const parts = [];
+  parts.push(
+    `分类器模型（classifierModel）落点为各预设的 .agent-presets/<preset>/agent.cordis.yml；本页只读展示，写入走 POST /api/guard/classifier（默认写入预设 ${CLASSIFIER_PRESET_DEFAULT}）。`,
+  );
+  parts.push(
+    '一次写入会同步该预设内 skill-router 与 guard-main-agent 两个 classifierModel 实例（历史约定两实例同值）。',
+  );
+  parts.push(
+    '生效条件：需重启 dsh-web(3080) 后新会话生效——preset composition 在 DSH 启动时读取并挂载，运行期不重注册；存量会话保持旧模型。',
+  );
+  if (activePreset) {
+    parts.push(
+      activeHasGuard
+        ? `当前会话所用预设为 ${activePreset}，其文件内含 guard-main-agent 块，守卫分类器在线。`
+        : `当前会话所用预设为 ${activePreset}，其文件内没有 guard-main-agent 块，该会话的守卫分类器不在线。`,
+    );
+  } else {
+    parts.push(
+      '未能确定当前会话实际使用的预设：若所用预设不含 guard-main-agent 块，则该会话的守卫分类器不在线（请在 DSH 会话里确认所用预设）。',
+    );
+  }
+  for (const p of presets) {
+    const g = p.models[CLASSIFIER_GUARD_PLUGIN];
+    const rr = p.models[CLASSIFIER_ROUTER_PLUGIN];
+    parts.push(
+      `预设 ${p.id}（${p.file}）：guard-main-agent ${
+        g ? `= ${g.value}（第 ${g.line} 行）` : '= 无（块内无 classifierModel 键）'
+      }；skill-router ${rr ? `= ${rr.value}（第 ${rr.line} 行）` : '= 无'}。`,
+    );
+  }
+  if (target && target.endpoint) {
+    parts.push(
+      `classifierEndpoint 只读展示，不可在本接口修改（当前 ${target.endpoint.value}，第 ${target.endpoint.line} 行）。`,
+    );
+  }
+  return { ok: true, presets, models, activePreset, note: parts.join(' ') };
+}
+
+/** 用备份内容回滚一次写入（写后校验失败时用）。 */
+async function rollbackClassifierWrite(file, bak) {
+  try {
+    const bakText = await fsp.readFile(bak, 'utf8');
+    await atomicWrite(file, bakText);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** POST /api/guard/classifier：surgical 改写目标预设里的 classifierModel（guard-main-agent + skill-router 同值）。 */
+async function putClassifier(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw httpError(400, 'body 需为 {model: "模型ID", preset?: "full"|"full-hub"}');
+  }
+  const presetId =
+    body.preset === undefined || body.preset === null || body.preset === ''
+      ? CLASSIFIER_PRESET_DEFAULT
+      : String(body.preset);
+  if (!CLASSIFIER_PRESET_IDS.includes(presetId)) {
+    throw httpError(
+      404,
+      `未知预设「${presetId}」：本接口只允许 ${CLASSIFIER_PRESET_IDS.map((p) => `'${p}'`).join(' / ')}`,
+    );
+  }
+  const chk = validateClassifierModel(body.model);
+  if (!chk.ok) throw httpError(400, `分类器模型 ID 非法：${chk.reason}`);
+
+  const file = path.resolve(classifierPresetFile(presetId));
+  const root = path.resolve(PRESETS_DIR);
+  if (!file.startsWith(root + path.sep)) {
+    throw httpError(400, `预设落点越界（${file} 不在 ${root} 下），已拒绝写入`);
+  }
+
+  return await withFileLock(file, async () => {
+    let text;
+    try {
+      text = await fsp.readFile(file, 'utf8');
+    } catch (err) {
+      throw httpError(404, `预设文件不可读：${file}（${err.code || err.message}）`);
+    }
+    const lines = text.split('\n');
+    const beforeCount = lines.length;
+
+    // ── 定位 guard-main-agent 块 ──
+    const guard = locateClassifierModel(lines, CLASSIFIER_GUARD_PLUGIN);
+    if (guard.state === 'missing') {
+      throw httpError(
+        404,
+        `预设 ${presetId} 的 ${file} 中没有 ${CLASSIFIER_GUARD_PLUGIN} 块：无法定位 classifierModel，未做任何修改（本接口不擅自新增块）`,
+      );
+    }
+    if (guard.state === 'ambiguous') {
+      throw httpError(
+        409,
+        `预设 ${presetId} 的 ${file} 中有 ${guard.blocks.length} 处 ${CLASSIFIER_GUARD_PLUGIN} 块（第 ${guard.blocks
+          .map((b) => b.start + 1)
+          .join('、')} 行）：无法确定改哪一处，已拒绝且未做任何修改`,
+      );
+    }
+    if (guard.state === 'no-config') {
+      throw httpError(
+        404,
+        `预设 ${presetId} 的 ${file} 中 ${CLASSIFIER_GUARD_PLUGIN} 块（第 ${guard.block.start + 1} 行起）内没有可用的 config 配置层：无法定位 classifierModel，未做任何修改`,
+      );
+    }
+
+    // ── 定位 skill-router 块（双实例同值约定）──
+    const router = locateClassifierModel(lines, CLASSIFIER_ROUTER_PLUGIN);
+    if (router.state === 'ambiguous') {
+      throw httpError(
+        409,
+        `预设 ${presetId} 的 ${file} 中有 ${router.blocks.length} 处 ${CLASSIFIER_ROUTER_PLUGIN} 块（第 ${router.blocks
+          .map((b) => b.start + 1)
+          .join('、')} 行）：无法确定同步哪一处，已拒绝且未做任何修改`,
+      );
+    }
+
+    // ── 生成编辑计划（基于原始 lines，暂不改动）──
+    const plan = [];
+    const targets = [
+      { plugin: CLASSIFIER_GUARD_PLUGIN, loc: guard, required: true },
+      { plugin: CLASSIFIER_ROUTER_PLUGIN, loc: router, required: false },
+    ];
+    for (const t of targets) {
+      const loc = t.loc;
+      if (loc.state !== 'ok') {
+        if (t.required) {
+          throw httpError(
+            404,
+            `预设 ${presetId} 的 ${file} 中 ${t.plugin} 块（第 ${loc.block.start + 1} 行起）内没有可用的 config 配置层：无法定位 classifierModel，未做任何修改`,
+          );
+        }
+        plan.push({ kind: 'skip', plugin: t.plugin, oldValue: null, reason: loc.state });
+        continue;
+      }
+      if (loc.modelLine >= 0) {
+        plan.push({
+          kind: 'replace',
+          plugin: t.plugin,
+          line: loc.modelLine,
+          oldValue: readKeyScalar(lines[loc.modelLine]),
+          newText: replaceKeyScalar(lines[loc.modelLine], chk.value),
+        });
+      } else {
+        const ins = planClassifierKeyInsert(lines, loc, 'classifierModel', chk.value);
+        if (!ins) {
+          if (t.required) {
+            throw httpError(
+              404,
+              `预设 ${presetId} 的 ${file} 中 ${t.plugin} 块的 config 层没有可沿用缩进的相邻子键，无法新增 classifierModel，未做任何修改`,
+            );
+          }
+          plan.push({ kind: 'skip', plugin: t.plugin, oldValue: null, reason: 'no-sibling' });
+          continue;
+        }
+        plan.push({
+          kind: 'insert',
+          plugin: t.plugin,
+          pos: ins.pos,
+          oldValue: null,
+          newText: ins.text,
+        });
+      }
+    }
+
+    // 按行号降序应用：后面的插入/替换不会影响前面行的下标
+    plan.sort((a, b) => (b.line ?? b.pos ?? 0) - (a.line ?? a.pos ?? 0));
+    for (const p of plan) {
+      if (p.kind === 'replace') lines[p.line] = p.newText;
+      else if (p.kind === 'insert') lines.splice(p.pos, 0, p.newText);
+    }
+    const insertedCount = plan.filter((p) => p.kind === 'insert').length;
+
+    const content = lines.join('\n');
+
+    // ── 写前：基础 YAML 校验（不合法就不落盘）──
+    try {
+      validateYamlText(content, file);
+    } catch (err) {
+      throw httpError(500, `写前 YAML 校验失败，未写入：${err.message}`);
+    }
+
+    // ── 写前准备：备份（失败即 fail-closed，绝不写入）──
+    const bak = await backup(file);
+    if (typeof pruneBackupCopies === 'function') await pruneBackupCopies(file);
+    if (!bak) {
+      throw httpError(500, `未生成备份，未写入（${file}）：为保证可回滚，必须先有备份`);
+    }
+    await atomicWrite(file, content);
+
+    // ── 写后回读校验：①目标行值 ②行数 ③loader 同款 YAML 方言 ──
+    let after;
+    try {
+      after = await fsp.readFile(file, 'utf8');
+    } catch (err) {
+      await rollbackClassifierWrite(file, bak);
+      throw httpError(500, `写后回读失败，已用备份回滚：${err.message}`);
+    }
+    const afterLines = after.split('\n');
+    for (const p of plan) {
+      if (p.kind === 'skip') continue;
+      const loc = locateClassifierModel(afterLines, p.plugin);
+      if (loc.state !== 'ok' || loc.modelLine < 0) {
+        await rollbackClassifierWrite(file, bak);
+        throw httpError(
+          500,
+          `写后回读校验失败：${p.plugin} 的 classifierModel 未落在 config 子键层，已用备份回滚（原文件内容已还原）`,
+        );
+      }
+      const got = readKeyScalar(afterLines[loc.modelLine]);
+      if (got !== chk.value) {
+        await rollbackClassifierWrite(file, bak);
+        throw httpError(
+          500,
+          `写后回读校验失败：${p.plugin} 的 classifierModel 读回为 ${JSON.stringify(got)}（期望 ${JSON.stringify(chk.value)}），已用备份回滚`,
+        );
+      }
+    }
+    if (afterLines.length !== beforeCount + insertedCount) {
+      await rollbackClassifierWrite(file, bak);
+      throw httpError(
+        500,
+        `写后回读校验失败：文件行数由 ${beforeCount} 变为 ${afterLines.length}（预期 ${beforeCount + insertedCount}），已用备份回滚`,
+      );
+    }
+    try {
+      parseWithLoaderDialect(after, file);
+    } catch (err) {
+      await rollbackClassifierWrite(file, bak);
+      throw httpError(500, `写后回读校验失败：${err.message}；已用备份回滚`);
+    }
+
+    // ── 组装响应 ──
+    const changed = [];
+    for (const p of plan) {
+      if (p.kind === 'skip') continue;
+      const loc = locateClassifierModel(afterLines, p.plugin);
+      changed.push({
+        plugin: p.plugin,
+        file,
+        line: loc.modelLine + 1,
+        oldValue: p.oldValue,
+        newValue: chk.value,
+      });
+    }
+    const models = await readClassifierModelsMap();
+    const dir = await fetchClassifierModelDir();
+    const routerNote = buildClassifierRouterNote(dir, chk.value);
+    const activePreset = await detectActivePreset();
+    let activeHasGuard = null;
+    if (activePreset) {
+      const item = await readClassifierPreset(activePreset);
+      activeHasGuard = item.hasBlock;
+    }
+    const routerSynced = plan.some(
+      (p) => p.plugin === CLASSIFIER_ROUTER_PLUGIN && p.kind !== 'skip',
+    );
+    const routerSkip = plan.find((p) => p.plugin === CLASSIFIER_ROUTER_PLUGIN && p.kind === 'skip');
+    const parts = [];
+    parts.push(`写入落点：${file}（预设 ${presetId}）`);
+    parts.push(
+      routerSynced
+        ? '一次写入已同步该预设内 skill-router 与 guard-main-agent 两个 classifierModel 实例（历史约定两实例同值）'
+        : `该预设内没有可同步的 skill-router 块，本次只改了 guard-main-agent 的 classifierModel（${
+            routerSkip && routerSkip.reason === 'no-sibling'
+              ? 'skill-router 的 config 层无可沿用的相邻子键'
+              : '无 skill-router 块'
+          }）`,
+    );
+    parts.push(
+      '生效条件：需重启 dsh-web(3080) 后新会话生效——preset composition 在 DSH 启动时读取并挂载，运行期不重注册；存量会话保持旧模型',
+    );
+    if (activePreset) {
+      parts.push(
+        activeHasGuard
+          ? `当前会话所用预设为 ${activePreset}，其文件内含 guard-main-agent 块，守卫分类器在线`
+          : `当前会话所用预设为 ${activePreset}，其文件内没有 guard-main-agent 块，该会话的守卫分类器不在线`,
+      );
+    } else {
+      parts.push(
+        '未能确定当前会话实际使用的预设：若所用预设不含 guard-main-agent 块，则该会话的守卫分类器不在线（请在 DSH 会话里确认所用预设）',
+      );
+    }
+    parts.push(routerNote);
+    return {
+      ok: true,
+      model: chk.value,
+      preset: presetId,
+      models,
+      changed,
+      backup: bak,
+      note: `${parts.join('；')}。`,
+    };
+  });
+}
 async function dispatch(req, res, pathname, method, body) {
   if (pathname === '/api/subagents' && method === 'GET') return listSubagents();
   if (pathname === '/api/subagents' && method === 'POST') return createSubagent(body);
@@ -2819,6 +3502,9 @@ module.exports = {
   correctThinkingLevelMap,
   getSupportedThinkingLevelsShim,
   builtinModelEffortLevels,
+  // 分类器模型（classifierModel）真实读写（供 tests/classifier.test.mjs 直调；行为与 /api/guard/classifier 一致）
+  getClassifier,
+  putClassifier,
 };
 
 /* ─────────────── 系统配置：settings.yaml + 白名单 ─────────────── */

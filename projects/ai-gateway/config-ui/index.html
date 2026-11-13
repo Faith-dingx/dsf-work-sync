@@ -183,8 +183,19 @@
         <div id="subagent-list" class="card-list"></div>
         <p class="hint" id="subagent-catalog-hint"></p>
         <div class="card form-card" id="guard-clf-card">
-          <h3>分类器模型（guard-main-agent）</h3>
-          <p class="hint">主编排 agent 守卫的廉价分类模型（走 9888 路由）。修改写入 full 预设（含 compaction 摘要与双 classifierModel 实例），<b>新会话挂载时生效</b>，存量会话保持旧模型。</p>
+          <h3>分类器模型（guard-main-agent / skill-router）</h3>
+          <p class="hint">主编排 agent 守卫与技能路由共用的廉价分类模型（走 9888 模型路由）。模型值写在各预设的 <code>.agent-presets/&lt;preset&gt;/agent.cordis.yml</code> 里 —— <b>guard-main-agent</b> 与 <b>skill-router</b> 两个块的 <code>classifierModel</code>（一次保存同步两处，历史约定两实例同值）。<code>classifierEndpoint</code> 只读展示，本页不开放修改。</p>
+          <p class="hint" style="border:1px solid #b45309;background:#1f1608;color:#fbbf24;padding:8px 10px;border-radius:6px">
+            ⚠ <b>保存后必须重启 dsh-web（3080）才会生效</b>：preset composition 在 DSH 启动时读取并挂载，运行期不重注册；<b>新会话</b>用新模型，存量会话保持旧模型。若当前会话所用预设不含 guard-main-agent 块，则该会话的守卫分类器不在线。
+          </p>
+          <label class="field">
+            <span>目标预设</span>
+            <select id="guard-clf-preset">
+              <option value="full">full</option>
+              <option value="full-hub">full-hub</option>
+            </select>
+          </label>
+          <div id="guard-clf-detail" class="hint"></div>
           <label class="field">
             <span>分类器模型 ID</span>
             <input type="text" id="guard-clf-model" placeholder="如 agnes_cn/agnes-3.0-flash" spellcheck="false">

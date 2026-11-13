@@ -459,24 +459,82 @@
     }
   }
 
-  /* ───────────── 分类器模型（guard-main-agent，full 预设） ───────────── */
+  /* ───────────── 分类器模型（guard-main-agent / skill-router 的 classifierModel） ───────────── */
+  let guardClfPresets = [];
+  let guardClfActivePreset = null;
+
+  /** 各预设当前值与行号的只读展示（guard / skill-router / endpoint）。 */
+  function renderGuardClassifierDetail(g) {
+    const el = $('guard-clf-detail');
+    if (!el) return;
+    const list = Array.isArray(g.presets) ? g.presets : [];
+    if (!list.length) {
+      el.innerHTML = '<div class="item-empty">没有可读的预设信息</div>';
+      return;
+    }
+    const show = (x) => (x ? `${esc(x.value)}（第 ${x.line} 行）` : '无');
+    el.innerHTML = list
+      .map(
+        (p) =>
+          `<div style="border-left:3px solid #374151;padding:4px 0 4px 8px;margin:6px 0">` +
+          `<b>预设 ${esc(p.id)}</b>${g.activePreset === p.id ? '（当前会话所用预设）' : ''}　<code>${esc(p.file)}</code><br>` +
+          `guard-main-agent：${show(p.models && p.models['guard-main-agent'])}<br>` +
+          `skill-router：${show(p.models && p.models['skill-router'])}<br>` +
+          `classifierEndpoint（只读，不可改）：${show(p.endpoint)}` +
+          (p.hasBlock
+            ? ''
+            : '<br><span style="color:#fbbf24">该预设文件内没有 guard-main-agent 块 → 用该预设的会话守卫分类器不在线</span>') +
+          `</div>`,
+      )
+      .join('');
+  }
+
+  /** 把目标预设当前的 classifierModel 回填到输入框。 */
+  function syncClassifierInputFromPreset() {
+    const sel = $('guard-clf-preset');
+    const want = sel && sel.value ? sel.value : 'full';
+    const p = guardClfPresets.find((x) => x.id === want);
+    const gm = p && p.models && p.models['guard-main-agent'];
+    $('guard-clf-model').value = gm && gm.value ? gm.value : '';
+  }
+
   async function loadGuardClassifier() {
     try {
       const g = await api('/api/guard/classifier');
+      guardClfPresets = Array.isArray(g.presets) ? g.presets : [];
+      guardClfActivePreset = g.activePreset || null;
+      // 兼容旧回填：full 预设 guard-main-agent 的 classifierModel
       $('guard-clf-model').value = (g.models && g.models.full) || '';
+      // 目标预设下拉（默认 full，可切 full-hub）
+      const sel = $('guard-clf-preset');
+      if (sel) {
+        if (!sel.dataset.ready) {
+          sel.innerHTML = guardClfPresets
+            .map((p) => `<option value="${esc(p.id)}">${esc(p.id)}</option>`)
+            .join('');
+          sel.dataset.ready = '1';
+        }
+        if (!guardClfPresets.some((p) => p.id === sel.value)) sel.value = 'full';
+      }
+      syncClassifierInputFromPreset();
+      renderGuardClassifierDetail(g);
       $('guard-clf-note').textContent = g.note || '';
     } catch (e) {
       $('guard-clf-note').textContent = '加载失败：' + e.message;
     }
   }
   async function saveGuardClassifier() {
+    const sel = $('guard-clf-preset');
+    const preset = sel && sel.value ? sel.value : 'full';
     try {
       const r = await api('/api/guard/classifier', {
         method: 'POST',
-        body: { model: $('guard-clf-model').value.trim() },
+        body: { model: $('guard-clf-model').value.trim(), preset },
       });
-      $('guard-clf-note').textContent = '✓ ' + (r.note || '已保存');
+      const note = '✓ ' + (r.note || '已保存');
       toast('分类器模型已保存', 'ok');
+      await loadGuardClassifier(); // 刷新行号/值展示
+      $('guard-clf-note').textContent = note;
     } catch (e) {
       $('guard-clf-note').textContent = e.message;
       toast('保存失败：' + e.message, 'err');
@@ -1367,6 +1425,8 @@
     // 子代理
     $('btn-subagent-refresh').addEventListener('click', loadSubagents);
     $('btn-guard-clf-save').addEventListener('click', saveGuardClassifier);
+    // 切换目标预设 → 回填该预设当前的 classifierModel
+    $('guard-clf-preset').addEventListener('change', syncClassifierInputFromPreset);
     $('subagent-list').addEventListener('click', (ev) => {
       const btn = ev.target.closest('button[data-act="save"]');
       if (!btn) return;

@@ -1594,3 +1594,20 @@ pi-ai 目录中 DeepSeek/glm-5.2/hy3/kimi 等模型的 thinkingLevelMap 将 mini
   ③`huoshan-code` 补 `deepseek-v4-flash`（full-hub 在用，直连实测 200）。
 - 结果：providers 段 13 → **11 个**，界面厂商名 = 火山 Coding Plan / 火山 Agent Plan / Agnes / Agnes_plan / MiniMax Plan(编程套餐) / Agnes 中国 plan / Agnes 中国 / DeepSeek / 软路由网关 /v1~v3。preset 在用的 5 个组合逐个直连实调**全部 200**。
 - 保留的三处 key 修正（HUOSHAN_API_KEY→ark-e9bf0e…、HUOSHAN_CODE_API_KEY→ark-f3aba030…、AGNES_CN_PLAN_API_KEY→apk-8IKI…）继续生效。
+
+## 2026-11-14（01:20-03:00）分类器模型写入恢复收口 + 默认预设切 full（续接 11-13 夜）
+
+- ⑬ **3083「分类器模型保存报 410」根因与修复**：config-ui server.js 硬编码 `410 Gone`，理由「DSH 0.2.0 已无 classifierModel / 无 guard-main-agent 包 / .agent-presets 无读取方」三条依据经查证全部不成立（包在 `packages/extensions/`、字段在 schema、读取方是 `packages/preset/agent-presets/src/index.ts` 的 boot 扫描 + web-app bundle `agent-preset-discovery` 插入）。恢复为真实读写：`GET/POST /api/guard/classifier` → surgical 改写 `.agent-presets/<preset>/agent.cordis.yml` 中 guard-main-agent 与 skill-router 两处 `classifierModel`（行尾注释与其余字节原样保留）；备份 fail-closed（备份失败不写）+ atomicWrite + 写后回读 + 失败回滚；模型 ID 字符集校验（禁空白/引号/#/控制字符）；9888 `/v1/models` 在册校验只提示不阻断（网关不可达也允许写）。生产目录 `/home/dingx/config-ui-3083/{server.js,app.js,index.html}`（01:27/01:29）与工作区副本同步落地。
+- ⑭ **默认预设切 full**：`~/.dsh/profiles/web/cordis.patch.yml` 追加 `- id: agent-preset-registry` + `config: {default: full}`（备份 `.bak-preset-default-20261114-015333`）→ 新会话默认用 full（含 guard-main-agent/skill-router）；standard 是 0.2.2-rc.3 内建默认，不含守卫。
+- 本轮（续接窗口）完成的验证，全部只读或隔离沙箱、真实 `~/.dsh` 零写入：
+  ①**YAML 合法性**（上一轮的未复核项）：三个活配置用运行时同款 `yaml@2.9.0` 解析 → profile patch 17 条 / full 18 条 / full-hub 18 条全部 OK。**注意**：这些文件含 `!!js` 标签，`js-yaml` 直接 `load` 会报 `unknown tag !<tag:yaml.org,2002:js>`，校验必须用 `yaml` 包或运行时 loader。
+  ②**默认预设键语义**：`AgentPresetRegistry.Config = { default: z.string().required(), selectedDefault: z.string().volatile() }`，`defaultId = selectedDefault.get() ?? config.default` → 补丁写 `default` 有效；`applyPatches` 对 `config` 是**整表替换**（shipped 的 config 只有 `default` 一个键，故不丢键），且**不写 `name` 字段**即不触发 `name mismatch` 跳过规则 → ⑭ 补丁语义正确。
+  ③**契约测试**：`node --test tests/classifier.test.mjs` → **90 通过 / 0 失败**（含「真实 ~/.dsh 零污染」用例 M1）。
+  ④**生产代码隔离沙箱实测**（`.temp/prod-clf-sandbox-20261114-024530`，CONFIG_DIR/PRESETS_DIR 指向沙箱）：GET 返回两预设当前值与行号 → POST 精确定位第 274/283 行并同步改写 + 自动生成备份 → 回读一致 → 非法值 400 拒写 → **真实预设文件 sha256 前后一致、无新增备份**。
+  ⑤**9888 目录核对**：`/v1/models` 含 `agnes_cn/agnes-3.0-flash`（目标模型在册），也含当前值 `modelscope/Qwen/Qwen3.8-Flash-Next`。
+  ⑥**门禁**：`npm test` 27 通过 / 0 失败。
+- 查明的两个硬事实：
+  ①guard 策略清单 blacklist 含 `/home/dingx/.dsh/.agent-presets/` → **主 agent 不能直接写预设文件**，分类器模型的值只能由 config-ui 进程写（用户在 3083 界面保存），不可由我代写；
+  ②config-ui 的 `ensureToken()` 对 token 文件缺失会**等待最多 60s**（extroot 挂载时序保护）→ 沙箱起服务必须预置 `.config-ui-token`，否则进程活着但永不监听（实测踩到，已记入技能库）。
+- **待用户执行三步**：①`XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart config-ui`（新后端生效）②在 3083「子代理」页把分类器模型改为 `agnes_cn/agnes-3.0-flash`（落点预设 full）③`XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart dsh-web`（preset 组合重新挂载 + 新默认预设生效）。
+- **未决（需用户拍板，未动）**：standard 预设是否也要自带守卫——路径甲（profile patch 全量重写 standard 的 plugins 137 行）、路径乙（改 shipped `standard.patch.yml`）、路径丙（新建 `standard-guard` 预设并切默认）。⑭ 已让新会话默认走 full，路径甲/丙仅在"手动选 standard 也要有守卫"时才必要。
