@@ -1550,3 +1550,12 @@ pi-ai 目录中 DeepSeek/glm-5.2/hy3/kimi 等模型的 thinkingLevelMap 将 mini
 - 未清：systemd journal 归档 944M 在 /var/log/journal/ 需 root（sudo journalctl --vacuum-size=200M）。
 - 查证结论：0.2.2 体系下 ~/.dsh/settings.yaml 与 dsh.env 并不存在（属旧 0.1.x 布局）；config-ui 的 SETTINGS_FILE 已指向 profiles/web/cordis.patch.yml，故 02:11 那条 ENOENT 属旧代码历史日志，现无此依赖——此前列为"观察项"的该项关闭。
 - 新增 docs/dsh-本机文件清单-20261113.md：dsh 全部涉及文件的准确路径清单（运行时仓/systemd 单元/活配置/config-ui 两套/工具脚本/工作区与文档/记忆库/远端与 2 号机/备份回滚点），70 条关键路径已逐条验证存在、零缺失。
+
+## 2026-11-13（18:00-18:15）接续仪式报错弹窗修复（dsh-auto-memory 3.3.17 打补丁）
+
+- 现象：GUI 弹窗「接续状态 refresh ritual failed: ritual-inspection-unavailable」，关不掉；触发于宿主兜底自动接续（浏览器关着/后台节流），当日 17:55:27 命中 1 次，此前 0 次。
+- 根因：插件 hostRefreshRitual() 要求宿主 sessionController 同时具备 prompt() 与 inspect()；DSH 0.2.2 只提供 prompt（签名与插件一致），inspect() 是 0.3.x 才有 → 守卫直接返回 ritual-inspection-unavailable，错误被上报到前端成弹窗。
+- 修法（保留「到量自动新开对话」机制，只消除报错）：把 inspect() 降级为可选——canInspect 缺失时跳过身份核对与回合轮询，改用「交接材料（白板/账本）是否刷新」判定完成，给 10 秒短窗，窗口内未刷新则 fail-soft 返回 ok（指令已投递，接续照常）。仪式指令本身照发，旧会话刷白板写账本的功能不丢。
+- 落地方式：走 profile 的 pnpm patchedDependencies（/home/dingx/.dsh/profiles/web/patches/@a9i5k4__dsh-auto-memory@3.3.17.patch，5189 字节），pnpm patch-commit 已重新应用并验证生效（运行态 lib/index.js 含新逻辑、ritual-inspection-unavailable 零残留）。备份：lib/index.js.bak-ritual-fix-20260713-1810、patch 源 .bak-ritual-fix-20260713-1810。
+- 同步固化：patch 副本入版本库 dsh-archive/patches/（便于迁移到 2 号机时复用）。
+- 待用户执行：重启 dsh-web 使新插件代码进进程（重启一律由用户执行）。

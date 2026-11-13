@@ -1,0 +1,74 @@
+diff --git a/lib/index.js b/lib/index.js
+index 967195210debb2ff0e0476933277a9f8bccd9eb9..68ba821a10c86f11c8a095c4fd09c6a5d82cde27 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1895,6 +1895,15 @@ async function callSubagentStartPre(subagents, providerName, opts) {
+       provider: providerName,
+       label,
+       request,
++      // rc.2 reads the delegation fields from the SPEC top level; the
++      // request-shaped copies above are the 0.1.x shape. Sending both keeps
++      // the plugin working across the rename without a version fork.
++      prompt,
++      ...(parent ? { parent } : {}),
++      ...(o.cwd !== undefined ? { cwd: o.cwd } : {}),
++      ...(o.agentPreset !== undefined ? { agentPreset: o.agentPreset } : {}),
++      ...(agentOptions ? { agentOptions } : {}),
++      ...(o.maxDepth !== undefined ? { maxDepth: o.maxDepth } : {}),
+       ...(signal ? { signal } : {}),
+       delivery: "parent",
+     })
+@@ -6296,7 +6305,11 @@ this._readError = undefined
+     const st = this._autoContState || (this._autoContState = {})
+     let sc = this._sessionController
+     if (!sc) { try { sc = this._ctxRef?.get?.('sessionController') } catch (e) {} }
+-    if (!sc || typeof sc.prompt !== 'function' || typeof sc.inspect !== 'function') return { ok: false, reason: 'ritual-inspection-unavailable' }
++    if (!sc || typeof sc.prompt !== 'function') return { ok: false, reason: 'ritual-prompt-unavailable' }
++    // DSH 0.2.x 的 sessionController 未提供 inspect()（0.3.x 才有）。inspect 只用于
++    // 「核对会话身份 + 观察回合是否收尾」；缺失时降级为「按交接材料是否刷新判定完成」——
++    // 仪式指令照发（让旧会话刷白板+写账本），功能不丢，也不再让宿主兜底接续报错弹窗。
++    const canInspect = typeof sc.inspect === 'function'
+     const sec = Number(this.config.autoContinueRefreshTimeoutSeconds)
+     const timeoutMs = (sec >= 15 && sec <= 900 ? sec : DEFAULT_AUTO_CONTINUE_REFRESH_TIMEOUT_SECONDS) * 1000
+     const deadline = Date.now() + timeoutMs
+@@ -6307,17 +6320,25 @@ this._readError = undefined
+     const probe = (fn) => continuationProbePre(fn, Math.min(probeCapMs, Math.max(1, deadline - Date.now())))
+     try {
+       const before = await probe(() => this.handoffMaterialStamp(sid))
+-      const initial = await probe((signal) => sc.inspect(sid, signal))
++      const initial = canInspect ? await probe((signal) => sc.inspect(sid, signal)) : null
+       if (initial?.meta?.id && initial.meta.id !== sid) throw new Error('ritual inspection source mismatch')
+-      const baseSeq = ((initial && initial.events) || []).reduce((seq, ev) => Math.max(seq, Number(ev.seq) || 0), -1)
++      const baseSeq = canInspect ? ((initial && initial.events) || []).reduce((seq, ev) => Math.max(seq, Number(ev.seq) || 0), -1) : -1
+       const reqId = typeof randomUUID === 'function' ? randomUUID() : 'dam-r-' + Date.now() + '-' + Math.random().toString(36).slice(2)
+       await probe((signal) => sc.prompt({ sessionId: sid, requestId: reqId, content: [{ type: 'text', text: this.refreshRitualPrompt() }], mode: 'queue' }, signal))
+       st.ritualForSid = sid
+       st.ritualAt = Date.now()
+-      while (Date.now() < deadline) {
++      // 无 inspect 时只给短窗等待材料刷新，避免兜底接续被长超时拖住
++      const softDeadline = canInspect ? deadline : Math.min(deadline, Date.now() + 10000)
++      while (Date.now() < softDeadline) {
+         const pollMs = Number(this._ritualPollMs) > 0 ? Number(this._ritualPollMs) : 2500
+-        await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(1, deadline - Date.now()))))
+-        if (Date.now() >= deadline) break
++        await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(1, softDeadline - Date.now()))))
++        if (Date.now() >= softDeadline) break
++        if (!canInspect) {
++          // 判据降级：交接材料（白板/账本）刷新即视为旧会话已跑完仪式
++          const cur = await probe(() => this.handoffMaterialStamp(sid))
++          if (cur && cur !== before) return { ok: true, waited: 'updated' }
++          continue
++        }
+         const snap = await probe((signal) => sc.inspect(sid, signal))
+         if (snap?.meta?.id && snap.meta.id !== sid) throw new Error('ritual inspection source mismatch')
+         const ending = continuationRitualEndPre(snap && snap.events, reqId, baseSeq)
+@@ -6326,7 +6347,8 @@ this._readError = undefined
+         const cur = await probe(() => this.handoffMaterialStamp(sid))
+         return { ok: true, waited: cur && cur !== before ? 'updated' : 'turn-ended' }
+       }
+-      return { ok: false, reason: 'timeout' }
++      // 无 inspect 且短窗内材料未刷新：fail-soft —— 指令已投递，接续照常进行，不报错
++      return canInspect ? { ok: false, reason: 'timeout' } : { ok: true, waited: 'sent' }
+     } catch (e) {
+       diag('host refresh ritual failed: ' + ((e && e.message) || e))
+       return { ok: false, reason: Date.now() >= deadline ? 'timeout' : String((e && e.message) || e) }
